@@ -8,6 +8,7 @@
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/PrimitiveComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Components/TextRenderComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
@@ -21,6 +22,7 @@
 #include "MandaMelaMatchState.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/SkeletalMesh.h"
+#include "Engine/StaticMesh.h"
 #include "Net/UnrealNetwork.h"
 #include "UObject/StrongObjectPtr.h"
 
@@ -117,6 +119,12 @@ AMandaMelaCharacter::AMandaMelaCharacter()
 	HeldTacticMesh->SetGenerateOverlapEvents(false);
 	HeldTacticMesh->SetVisibility(false);
 
+	HeldCameraMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("HeldCameraItem"));
+	HeldCameraMesh->SetupAttachment(GetMesh(), TEXT("RightHand"));
+	HeldCameraMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	HeldCameraMesh->SetGenerateOverlapEvents(false);
+	HeldCameraMesh->SetVisibility(false);
+
 	// Note: The skeletal mesh and anim blueprint references on the Mesh component (inherited from Character) 
 	// are set in the derived blueprint asset named ThirdPersonCharacter (to avoid direct content references in C++)
 }
@@ -165,11 +173,8 @@ void AMandaMelaCharacter::BeginPlay()
 	HeadNumberText->SetRelativeLocation(FVector(0.0f, 0.0f, 90.0f));
 	HeadNumberText->SetRelativeRotation(FRotator::ZeroRotator);
 	ApplyCreativeAppearance();
-	if (bUsingCreativeCharacter)
-	{
-		// Keep first-use animation loading/compression out of pickup and throw actions.
-		PreloadTacticalAnimations();
-	}
+	// Keep first-use animation loading/compression out of pickup and throw actions.
+	PreloadTacticalAnimations();
 	UpdateHeldTacticalItem();
 	RefreshHeadNumber();
 	ApplyEliminatedState();
@@ -291,13 +296,14 @@ bool AMandaMelaCharacter::IsEliminated() const
 void AMandaMelaCharacter::GetBinocularVisualComponents(TArray<UPrimitiveComponent*>& OutComponents) const
 {
 	OutComponents.Reset();
-	OutComponents.Reserve(6);
+	OutComponents.Reserve(7);
 	OutComponents.Add(GetMesh());
 	OutComponents.Add(FaceMesh);
 	OutComponents.Add(OutfitMesh);
 	OutComponents.Add(HeadAccessoryMesh);
 	OutComponents.Add(HeadNumberText);
 	OutComponents.Add(HeldTacticMesh);
+	OutComponents.Add(HeldCameraMesh);
 }
 
 void AMandaMelaCharacter::RefreshBinocularVisuals()
@@ -481,23 +487,26 @@ void AMandaMelaCharacter::SetHeldTacticalItem(EMandaMelaItemType ItemType)
 
 void AMandaMelaCharacter::UpdateHeldTacticalItem()
 {
-	if (!HeldTacticMesh || TacticalMeshMotion != 0)
+	if (!HeldTacticMesh || !HeldCameraMesh || TacticalMeshMotion != 0)
 	{
 		return;
 	}
 	SetHeldTacticalMesh(HeldTacticalItemType);
-	if (HeldTacticalItemType == EMandaMelaItemType::None || IsEliminated())
+	const bool bShowItem = HeldTacticalItemType != EMandaMelaItemType::None && !IsEliminated();
+	if (bShowItem)
 	{
-		HeldTacticMesh->SetVisibility(false, true);
-		return;
+		AttachHeldTacticalMesh(HeldTacticalItemType);
 	}
-	AttachHeldTacticalMesh(HeldTacticalItemType);
-	HeldTacticMesh->SetVisibility(true, true);
+	const bool bIsCamera = HeldTacticalItemType == EMandaMelaItemType::Camera;
+	HeldTacticMesh->SetVisibility(bShowItem && !bIsCamera, true);
+	HeldCameraMesh->SetVisibility(bShowItem && bIsCamera && HeldCameraMesh->GetStaticMesh() != nullptr, true);
 }
 
 void AMandaMelaCharacter::PreloadTacticalAnimations()
 {
-	if (!TacticalThrowAnimation)
+	CameraUseAnimation = LoadObject<UAnimSequence>(nullptr, TEXT("/Game/Tactics/camera/Camera_GameReady/Camera_Use_Animation_Anim.Camera_Use_Animation_Anim"));
+	CameraUseSkeletalMesh = LoadObject<USkeletalMesh>(nullptr, TEXT("/Game/Tactics/camera/Camera_GameReady/Camera_Use_Animation.Camera_Use_Animation"));
+	if (bUsingCreativeCharacter && !TacticalThrowAnimation)
 	{
 		TacticalThrowAnimation = LoadObject<UAnimSequence>(nullptr, TEXT("/Game/Creative_Characters_FREE/Animations/Retargeted_Mannequin/ItemActions/Tactic_MM_Pistol_Fire.Tactic_MM_Pistol_Fire"));
 	}
@@ -508,6 +517,36 @@ void AMandaMelaCharacter::SetHeldTacticalMesh(EMandaMelaItemType ItemType)
 	if (!HeldTacticMesh)
 	{
 		return;
+	}
+	if (ItemType == EMandaMelaItemType::Camera)
+	{
+		HeldTacticMesh->SetSkeletalMesh(nullptr);
+		HeldTacticMesh->SetVisibility(false, true);
+		if (!HeldCameraMesh)
+		{
+			return;
+		}
+
+		UStaticMesh* Model = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/Tactics/camera/Camera_GameReady/Camera_GameReady.Camera_GameReady"));
+		HeldCameraMesh->SetStaticMesh(Model);
+		if (!Model)
+		{
+			HeldCameraMesh->SetVisibility(false, true);
+			return;
+		}
+
+		const FBoxSphereBounds Bounds = Model->GetBounds();
+		const float LongestDimension = Bounds.BoxExtent.GetAbs().GetMax() * 2.0f;
+		const float Scale = LongestDimension > KINDA_SMALL_NUMBER ? 24.0f / LongestDimension : 1.0f;
+		HeldCameraMesh->SetRelativeScale3D(FVector(Scale));
+		HeldCameraMesh->SetRelativeRotation(FRotator::ZeroRotator);
+		HeldCameraMesh->SetRelativeLocation(FVector(5.0f, 0.0f, 0.0f) - Bounds.Origin * Scale);
+		HeldCameraMesh->SetVisibility(false, true);
+		return;
+	}
+	if (HeldCameraMesh)
+	{
+		HeldCameraMesh->SetVisibility(false, true);
 	}
 	const TCHAR* AssetPath = nullptr;
 	float TargetSize = 0.0f;
@@ -538,6 +577,7 @@ void AMandaMelaCharacter::SetHeldTacticalMesh(EMandaMelaItemType ItemType)
 		HeldTacticMesh->SetVisibility(false, true);
 		return;
 	}
+	HeldTacticMesh->SetAnimationMode(EAnimationMode::AnimationBlueprint);
 	const FBoxSphereBounds Bounds = Model->GetBounds();
 	const float LongestDimension = Bounds.BoxExtent.GetAbs().GetMax() * 2.0f;
 	const float Scale = LongestDimension > KINDA_SMALL_NUMBER ? TargetSize / LongestDimension : 1.0f;
@@ -548,9 +588,26 @@ void AMandaMelaCharacter::SetHeldTacticalMesh(EMandaMelaItemType ItemType)
 
 void AMandaMelaCharacter::AttachHeldTacticalMesh(EMandaMelaItemType ItemType)
 {
-	if (!HeldTacticMesh || !GetMesh())
+	if (!GetMesh())
 	{
 		return;
+	}
+	if (ItemType == EMandaMelaItemType::Camera)
+	{
+		if (HeldCameraMesh)
+		{
+			HeldCameraMesh->AttachToComponent(GetMesh(), FAttachmentTransformRules::SnapToTargetNotIncludingScale, TEXT("RightHand"));
+			SetHeldTacticalMesh(ItemType);
+		}
+		return;
+	}
+	if (!HeldTacticMesh)
+	{
+		return;
+	}
+	if (HeldCameraMesh)
+	{
+		HeldCameraMesh->SetVisibility(false, true);
 	}
 	HeldTacticMesh->AttachToComponent(GetMesh(), FAttachmentTransformRules::SnapToTargetNotIncludingScale, TEXT("RightHand"));
 	SetHeldTacticalMesh(ItemType);
@@ -576,6 +633,15 @@ void AMandaMelaCharacter::MulticastPlayTacticalPickup_Implementation(EMandaMelaI
 {
 	SetHeldTacticalMesh(ItemType);
 	StopCrouchAnimation(0.12f);
+	if (ItemType == EMandaMelaItemType::Camera)
+	{
+		AttachHeldTacticalMesh(ItemType);
+		if (HeldCameraMesh)
+		{
+			HeldCameraMesh->SetVisibility(HeldCameraMesh->GetStaticMesh() != nullptr, true);
+		}
+		return;
+	}
 	if (!HeldTacticMesh || !HeldTacticMesh->GetSkeletalMeshAsset())
 	{
 		return;
@@ -706,6 +772,10 @@ void AMandaMelaCharacter::UpdateTacticalMeshMotion()
 
 void AMandaMelaCharacter::ToggleCrouch()
 {
+	if (const APlayerController* PlayerController = Cast<APlayerController>(GetController()); PlayerController && PlayerController->IsMoveInputIgnored())
+	{
+		return;
+	}
 	if (IsEliminated() || !bUsingCreativeCharacter)
 	{
 		return;
@@ -755,6 +825,10 @@ void AMandaMelaCharacter::ApplyEliminatedState()
 			if (HeldTacticMesh)
 			{
 				HeldTacticMesh->SetVisibility(false, true);
+			}
+			if (HeldCameraMesh)
+			{
+				HeldCameraMesh->SetVisibility(false, true);
 			}
 			GetMesh()->SetRelativeScale3D(OriginalCreativeMeshScale);
 			GetMesh()->SetCollisionProfileName(TEXT("Ragdoll"));
@@ -813,6 +887,33 @@ void AMandaMelaCharacter::MulticastPlayEliminationEffect_Implementation()
 	BP_OnEliminationEffect();
 }
 
+float AMandaMelaCharacter::GetCameraUseAnimationDuration() const
+{
+	return CameraUseAnimation && CameraUseSkeletalMesh ? CameraUseAnimation->GetPlayLength() : 0.0f;
+}
+
+void AMandaMelaCharacter::MulticastPlayCameraUseAnimation_Implementation()
+{
+	if (!HeldTacticMesh || !HeldCameraMesh || !CameraUseAnimation || !CameraUseSkeletalMesh)
+	{
+		return;
+	}
+
+	HeldCameraMesh->SetVisibility(false, true);
+	HeldTacticMesh->SetSkeletalMesh(CameraUseSkeletalMesh);
+	const FBoxSphereBounds Bounds = CameraUseSkeletalMesh->GetBounds();
+	const float LongestDimension = Bounds.BoxExtent.GetAbs().GetMax() * 2.0f;
+	const float Scale = LongestDimension > KINDA_SMALL_NUMBER ? 24.0f / LongestDimension : 1.0f;
+	HeldTacticMesh->SetRelativeScale3D(FVector(Scale));
+	HeldTacticMesh->SetRelativeRotation(FRotator::ZeroRotator);
+	HeldTacticMesh->SetRelativeLocation(FVector(5.0f, 0.0f, 0.0f) - Bounds.Origin * Scale);
+	HeldTacticMesh->SetAnimationMode(EAnimationMode::AnimationSingleNode);
+	HeldTacticMesh->SetAnimation(CameraUseAnimation);
+	HeldTacticMesh->SetPosition(0.0f, false);
+	HeldTacticMesh->SetVisibility(true, true);
+	HeldTacticMesh->Play(false);
+}
+
 void AMandaMelaCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
@@ -865,6 +966,7 @@ void AMandaMelaCharacter::Look(const FInputActionValue& Value)
 
 void AMandaMelaCharacter::DoMove(float Right, float Forward)
 {
+	if (const APlayerController* PlayerController = Cast<APlayerController>(GetController()); PlayerController && PlayerController->IsMoveInputIgnored()) return;
 	if (GetController() != nullptr && !IsEliminated())
 	{
 		// find out which way is forward
@@ -885,6 +987,7 @@ void AMandaMelaCharacter::DoMove(float Right, float Forward)
 
 void AMandaMelaCharacter::DoLook(float Yaw, float Pitch)
 {
+	if (const APlayerController* PlayerController = Cast<APlayerController>(GetController()); PlayerController && PlayerController->IsLookInputIgnored()) return;
 	if (GetController() != nullptr && !IsEliminated())
 	{
 		// add yaw and pitch input to controller
@@ -895,6 +998,7 @@ void AMandaMelaCharacter::DoLook(float Yaw, float Pitch)
 
 void AMandaMelaCharacter::DoJumpStart()
 {
+	if (const APlayerController* PlayerController = Cast<APlayerController>(GetController()); PlayerController && PlayerController->IsMoveInputIgnored()) return;
 	// signal the character to jump
 	if (!IsEliminated())
 	{

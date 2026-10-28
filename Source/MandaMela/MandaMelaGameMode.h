@@ -17,6 +17,15 @@ class APlayerStart;
 class UNiagaraSystem;
 class USoundBase;
 
+struct FMandaMelaPendingCameraPhoto
+{
+	TWeakObjectPtr<AMandaMelaCharacter> Target;
+	TWeakObjectPtr<AMandaMelaPlayerState> TargetState;
+	int32 Number = INDEX_NONE;
+	FString TargetName;
+	bool bCompleted = false;
+};
+
 /**
  *  Simple GameMode for a third person game
  */
@@ -41,6 +50,10 @@ public:
 	void HandlePickup(AMandaMelaPlayerController* Player, AMandaMelaPickup* Pickup);
 	void HandleDrop(AMandaMelaPlayerController* Player, int32 Slot);
 	void HandleUseItem(AMandaMelaPlayerController* Player, int32 Slot, class AMandaMelaCharacter* VisibleTarget);
+	void HandleCameraPhotoCapture(AMandaMelaPlayerController* Player);
+	void HandleCameraPhotoAnswer(AMandaMelaPlayerController* Player, const FString& Digits);
+	void CancelCameraPhoto(AMandaMelaPlayerController* Player);
+	static bool IsCameraPhotoAnswerCorrect(const FString& Digits, int32 CapturedNumber);
 	void HandleFlagTouch(AMandaMelaFlag* TouchedFlag, AMandaMelaCharacter* Character);
 	void SelectMatchMode(AMandaMelaPlayerController* Host, EMandaMelaMatchMode Mode);
 	void StartMatch(AMandaMelaPlayerController* Host);
@@ -106,6 +119,7 @@ private:
 	void EndMatchForTeam(EMandaMelaTeam WinningTeam);
 	void RespawnTeamPlayer(TWeakObjectPtr<AMandaMelaPlayerState> PlayerState);
 	void DropCarriedFlag(AMandaMelaPlayerState* PlayerState);
+	void EliminateTarget(AMandaMelaPlayerState* AttackerState, AMandaMelaPlayerState* TargetState, AMandaMelaCharacter* TargetCharacter);
 	AMandaMelaFlag* FindFlagCarriedBy(const AMandaMelaPlayerState* PlayerState) const;
 	void SetupTeamFlags();
 	void SetupTeamSpawnPoints();
@@ -114,13 +128,18 @@ private:
 	void OnMatchClockTick();
 	bool IsCurrentPlayer(const APlayerState* PlayerState) const;
 	bool IsVisibleTarget(AController* Attacker, AMandaMelaCharacter* Target, float MaxRange) const;
+	bool IsPointInCameraView(AController* Viewer, const FVector& Point, float MaxRange, float* OutCenterScore = nullptr, float AspectRatioOverride = 0.0f) const;
+	AMandaMelaCharacter* FindCameraPhotoTarget(AMandaMelaPlayerController* Player, float MaxRange) const;
+	TMap<TWeakObjectPtr<AMandaMelaPlayerController>, int32> ActiveCameraSessions;
 	void DetonateFlashbang(TWeakObjectPtr<AMandaMelaPlayerState> ThrowerState, TWeakObjectPtr<AMandaMelaCharacter> ThrowerCharacter, const FVector& FlashLocation);
 	void StartLootSpawning();
 	void StopLootSpawning();
 	void SpawnRandomLoot();
 	bool FindRandomLootLocation(FVector& OutLocation) const;
+	TMap<TWeakObjectPtr<AMandaMelaPlayerController>, FMandaMelaPendingCameraPhoto> PendingCameraPhotos;
 	TSet<int32> RoundUsedNumbers;
 	bool bOfflineBotsSpawned = false;
+	bool bSpawnCameraNext = false;
 	FTimerHandle LootSpawnTimer;
 	FTimerHandle MatchClockTimer;
 	UPROPERTY(Transient)

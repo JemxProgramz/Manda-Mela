@@ -16,6 +16,7 @@ class UAnimSequence;
 class UAnimMontage;
 class USkeletalMesh;
 class USkeletalMeshComponent;
+class UStaticMeshComponent;
 class UPrimitiveComponent;
 class AMandaMelaPlayerState;
 struct FInputActionValue;
@@ -103,6 +104,9 @@ protected:
 	UPROPERTY(VisibleAnywhere, Category="Components")
 	TObjectPtr<USkeletalMeshComponent> HeldTacticMesh;
 
+	UPROPERTY(VisibleAnywhere, Category="Components")
+	TObjectPtr<UStaticMeshComponent> HeldCameraMesh;
+
 	UPROPERTY(ReplicatedUsing=OnRep_HeldTacticalItem)
 	EMandaMelaItemType HeldTacticalItemType = EMandaMelaItemType::None;
 
@@ -129,6 +133,12 @@ protected:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UAnimSequence> TacticalThrowAnimation;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UAnimSequence> CameraUseAnimation;
+
+	UPROPERTY(Transient)
+	TObjectPtr<USkeletalMesh> CameraUseSkeletalMesh;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UAnimMontage> ActiveTacticalActionMontage;
@@ -199,6 +209,11 @@ public:
 public:
 
 	void SetHeldTacticalItem(EMandaMelaItemType ItemType);
+
+	UFUNCTION(NetMulticast, Reliable)
+	void MulticastPlayCameraUseAnimation();
+
+	float GetCameraUseAnimationDuration() const;
 
 	UFUNCTION(NetMulticast, Reliable)
 	void MulticastPlayTacticalPickup(EMandaMelaItemType ItemType, FVector PickupLocation);

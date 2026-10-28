@@ -2,6 +2,7 @@
 
 #include "MandaMelaGameplayWidget.h"
 #include "Components/Border.h"
+#include "Components/BackgroundBlur.h"
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
 #include "Components/Image.h"
@@ -373,30 +374,111 @@ void UMandaMelaGameplayWidget::NativeOnInitialized()
 	ScoreboardLayout->AddChildToVerticalBox(ScoreboardScroll)->SetSize(FillSize());
 	ScoreboardPanel->SetVisibility(ESlateVisibility::Collapsed);
 
-	CameraPhotoPanel = MakeCard(WidgetTree, FLinearColor(0.94f, 0.90f, 0.78f, 1.0f), TEXT("CameraPhotoPanel"));
-	CameraPhotoPanel->SetPadding(FMargin(12.0f, 12.0f, 12.0f, 10.0f));
+	CameraModePanel = WidgetTree->ConstructWidget<UCanvasPanel>(UCanvasPanel::StaticClass(), TEXT("CameraModePanel"));
+	CameraModePanel->SetVisibility(ESlateVisibility::Collapsed);
+	if (UCanvasPanelSlot* CameraModeSlot = Root->AddChildToCanvas(CameraModePanel))
+	{
+		CameraModeSlot->SetAnchors(FAnchors(0.0f, 0.0f, 1.0f, 1.0f));
+		CameraModeSlot->SetOffsets(FMargin(0.0f));
+	}
+	auto AddCameraBezelBar = [this](const FAnchors& Anchors)
+	{
+		UBorder* Bar = MakeCard(WidgetTree, FLinearColor(0.01f, 0.02f, 0.025f, 0.88f));
+		Bar->SetPadding(FMargin(0.0f));
+		if (UCanvasPanelSlot* Slot = CameraModePanel->AddChildToCanvas(Bar))
+		{
+			Slot->SetAnchors(Anchors);
+			Slot->SetOffsets(FMargin(0.0f));
+		}
+	};
+	AddCameraBezelBar(FAnchors(0.0f, 0.0f, 0.14f, 1.0f));
+	AddCameraBezelBar(FAnchors(0.86f, 0.0f, 1.0f, 1.0f));
+	AddCameraBezelBar(FAnchors(0.14f, 0.0f, 0.86f, 0.08f));
+	AddCameraBezelBar(FAnchors(0.14f, 0.92f, 0.86f, 1.0f));
+	auto AddViewfinderText = [this](const TCHAR* Text, int32 FontSize, const FVector2D& Anchor, const FVector2D& Alignment, const FVector2D& Size)
+	{
+		UTextBlock* Label = MakeLabel(WidgetTree, Text, FontSize, MandaWhite, FName("Bold"));
+		Label->SetJustification(ETextJustify::Center);
+		if (UCanvasPanelSlot* Slot = CameraModePanel->AddChildToCanvas(Label))
+		{
+			Slot->SetAnchors(FAnchors(Anchor.X, Anchor.Y));
+			Slot->SetAlignment(Alignment);
+			Slot->SetSize(Size);
+		}
+		return Label;
+	};
+	AddViewfinderText(TEXT("┌"), 34, FVector2D(0.18f, 0.18f), FVector2D(0.5f), FVector2D(44.0f, 44.0f));
+	AddViewfinderText(TEXT("┐"), 34, FVector2D(0.82f, 0.18f), FVector2D(0.5f), FVector2D(44.0f, 44.0f));
+	AddViewfinderText(TEXT("└"), 34, FVector2D(0.18f, 0.82f), FVector2D(0.5f), FVector2D(44.0f, 44.0f));
+	AddViewfinderText(TEXT("┘"), 34, FVector2D(0.82f, 0.82f), FVector2D(0.5f), FVector2D(44.0f, 44.0f));
+	AddViewfinderText(TEXT("□"), 24, FVector2D(0.5f, 0.5f), FVector2D(0.5f), FVector2D(38.0f, 38.0f));
+	CameraModeStatusText = AddViewfinderText(TEXT("CAMERA READY  /  LEFT CLICK TO TAKE PHOTO"), 13,
+		FVector2D(0.5f, 0.12f), FVector2D(0.5f), FVector2D(520.0f, 28.0f));
+
+	CameraPhotoBlur = WidgetTree->ConstructWidget<UBackgroundBlur>(UBackgroundBlur::StaticClass(), TEXT("CameraPhotoBlur"));
+	CameraPhotoBlur->SetBlurStrength(4.0f);
+	CameraPhotoBlur->SetVisibility(ESlateVisibility::Collapsed);
+	if (UCanvasPanelSlot* BlurSlot = Root->AddChildToCanvas(CameraPhotoBlur))
+	{
+		BlurSlot->SetAnchors(FAnchors(0.0f, 0.0f, 1.0f, 1.0f));
+		BlurSlot->SetOffsets(FMargin(0.0f));
+		BlurSlot->SetZOrder(39);
+	}
+	CameraPhotoBackdrop = MakeCard(WidgetTree, FLinearColor(0.0f, 0.0f, 0.0f, 0.24f), TEXT("CameraPhotoBackdrop"));
+	CameraPhotoBackdrop->SetPadding(FMargin(0.0f));
+	CameraPhotoBackdrop->SetVisibility(ESlateVisibility::Collapsed);
+	if (UCanvasPanelSlot* BackdropSlot = Root->AddChildToCanvas(CameraPhotoBackdrop))
+	{
+		BackdropSlot->SetAnchors(FAnchors(0.0f, 0.0f, 1.0f, 1.0f));
+		BackdropSlot->SetOffsets(FMargin(0.0f));
+		BackdropSlot->SetZOrder(40);
+	}
+
+	const FLinearColor PolaroidPaper(0.96f, 0.93f, 0.84f, 1.0f);
+	CameraPhotoPanel = MakeCard(WidgetTree, PolaroidPaper, TEXT("CameraPhotoPanel"));
+	CameraPhotoPanel->SetPadding(FMargin(22.0f, 22.0f, 22.0f, 20.0f));
 	CameraPhotoPanel->SetVisibility(ESlateVisibility::Collapsed);
 	UVerticalBox* CameraPhotoLayout = WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass(), TEXT("CameraPhotoLayout"));
 	CameraPhotoPanel->SetContent(CameraPhotoLayout);
-	USizeBox* CameraPhotoFrame = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass(), TEXT("CameraPhotoFrame"));
-	CameraPhotoFrame->SetWidthOverride(320.0f);
-	CameraPhotoFrame->SetHeightOverride(250.0f);
+	CameraPhotoFrame = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass(), TEXT("CameraPhotoFrame"));
+	CameraPhotoFrame->SetWidthOverride(680.0f);
+	CameraPhotoFrame->SetHeightOverride(680.0f);
 	CameraPhotoImageWidget = WidgetTree->ConstructWidget<UImage>(UImage::StaticClass(), TEXT("CameraPhotoImage"));
 	CameraPhotoImageWidget->SetBrushTintColor(FLinearColor::White);
 	CameraPhotoFrame->SetContent(CameraPhotoImageWidget);
-	CameraPhotoLayout->AddChildToVerticalBox(CameraPhotoFrame)->SetPadding(FMargin(0.0f, 0.0f, 0.0f, 8.0f));
-	UTextBlock* CameraLabel = MakeLabel(WidgetTree, TEXT("TARGET NUMBER"), 11, MandaNavy, FName("Bold"));
+	CameraPhotoLayout->AddChildToVerticalBox(CameraPhotoFrame)->SetPadding(FMargin(0.0f, 0.0f, 0.0f, 14.0f));
+	UTextBlock* CameraLabel = MakeLabel(WidgetTree, TEXT("ENTER THE NUMBER IN THE PHOTO"), 14, MandaNavy, FName("Bold"));
 	CameraLabel->SetJustification(ETextJustify::Center);
-	CameraPhotoLayout->AddChildToVerticalBox(CameraLabel)->SetPadding(FMargin(0.0f, 0.0f, 0.0f, 2.0f));
-	CameraPhotoNumberText = MakeLabel(WidgetTree, TEXT("----"), 32, MandaNavy, FName("Bold"), TEXT("CameraPhotoNumber"));
-	CameraPhotoNumberText->SetJustification(ETextJustify::Center);
-	CameraPhotoLayout->AddChildToVerticalBox(CameraPhotoNumberText);
+	CameraPhotoLayout->AddChildToVerticalBox(CameraLabel)->SetPadding(FMargin(0.0f, 0.0f, 0.0f, 8.0f));
+	UHorizontalBox* CameraDigits = WidgetTree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass(), TEXT("CameraPhotoDigits"));
+	CameraPhotoLayout->AddChildToVerticalBox(CameraDigits)->SetPadding(FMargin(0.0f, 0.0f, 0.0f, 8.0f));
+	for (int32 Index = 0; Index < 4; ++Index)
+	{
+		USizeBox* DigitSize = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass());
+		DigitSize->SetHeightOverride(54.0f);
+		UBorder* DigitBorder = MakeCard(WidgetTree, MandaNavy);
+		DigitBorder->SetPadding(FMargin(2.0f));
+		UBorder* DigitFace = MakeCard(WidgetTree, PolaroidPaper);
+		DigitFace->SetPadding(FMargin(4.0f));
+		UTextBlock* DigitText = MakeLabel(WidgetTree, TEXT("_"), 32, MandaNavy, FName("Bold"));
+		DigitText->SetJustification(ETextJustify::Center);
+		DigitFace->SetContent(DigitText);
+		DigitBorder->SetContent(DigitFace);
+		DigitSize->SetContent(DigitBorder);
+		UHorizontalBoxSlot* DigitSlot = CameraDigits->AddChildToHorizontalBox(DigitSize);
+		DigitSlot->SetSize(FillSize());
+		DigitSlot->SetPadding(FMargin(5.0f, 0.0f));
+		CameraPhotoDigitTexts.Add(DigitText);
+	}
+	CameraPhotoStatusText = MakeLabel(WidgetTree, TEXT("TYPE 0-9  /  ENTER SUBMIT  /  ESC CLOSE"), 11, MandaNavy, FName("Bold"), TEXT("CameraPhotoStatus"));
+	CameraPhotoStatusText->SetJustification(ETextJustify::Center);
+	CameraPhotoLayout->AddChildToVerticalBox(CameraPhotoStatusText);
 	if (UCanvasPanelSlot* CameraSlot = Root->AddChildToCanvas(CameraPhotoPanel))
 	{
-		// Lower right-centre of the screen
-		CameraSlot->SetAnchors(FAnchors(0.7f, 0.7f));
+		CameraSlot->SetAnchors(FAnchors(0.5f, 0.5f));
 		CameraSlot->SetAlignment(FVector2D(0.5f, 0.5f));
-		CameraSlot->SetSize(FVector2D(344.0f, 334.0f));
+		CameraSlot->SetSize(FVector2D(724.0f, 880.0f));
+		CameraSlot->SetZOrder(50);
 	}
 
 	// Key hint panel bottom-right
@@ -521,6 +603,11 @@ void UMandaMelaGameplayWidget::SetGuessText(const FString& Digits)
 		const FString Digit = Digits.IsValidIndex(Index) ? Digits.Mid(Index, 1) : TEXT("_");
 		GuessDigitTexts[Index]->SetText(FText::FromString(Digit));
 	}
+	for (int32 Index = 0; Index < CameraPhotoDigitTexts.Num(); ++Index)
+	{
+		const FString Digit = Digits.IsValidIndex(Index) ? Digits.Mid(Index, 1) : TEXT("_");
+		CameraPhotoDigitTexts[Index]->SetText(FText::FromString(Digit));
+	}
 }
 
 void UMandaMelaGameplayWidget::SetFeedback(const FText& Feedback)
@@ -579,69 +666,87 @@ void UMandaMelaGameplayWidget::SetDeathNotice(bool bVisible, const FText& Messag
 	}
 }
 
-void UMandaMelaGameplayWidget::SetCameraPhoto(UTextureRenderTarget2D* Photo, const FText& TargetNumber)
+void UMandaMelaGameplayWidget::ShowCameraPhotoCard(UTextureRenderTarget2D* Photo, const FText& Status)
 {
-	if (CameraPhotoImageWidget && Photo)
+	if (Photo && CameraPhotoFrame && Photo->SizeX > 0 && Photo->SizeY > 0)
+	{
+		constexpr float MaxPhotoEdge = 680.0f;
+		const float PhotoAspect = static_cast<float>(Photo->SizeX) / Photo->SizeY;
+		CameraPhotoFrame->SetWidthOverride(PhotoAspect >= 1.0f ? MaxPhotoEdge : MaxPhotoEdge * PhotoAspect);
+		CameraPhotoFrame->SetHeightOverride(PhotoAspect >= 1.0f ? MaxPhotoEdge / PhotoAspect : MaxPhotoEdge);
+	}
+	if (CameraPhotoImageWidget)
 	{
 		CameraPhotoImageWidget->SetBrushResourceObject(Photo);
 	}
-	if (CameraPhotoNumberText)
+	SetCameraPhotoStatus(Status);
+	if (CameraPhotoBackdrop)
 	{
-		CameraPhotoNumberText->SetText(TargetNumber);
+		CameraPhotoBackdrop->SetVisibility(ESlateVisibility::HitTestInvisible);
 	}
+	if (GuessPanel) GuessPanel->SetVisibility(ESlateVisibility::Collapsed);
+	if (QuickbarPanel) QuickbarPanel->SetVisibility(ESlateVisibility::Collapsed);
+	if (PromptPanel) PromptPanel->SetVisibility(ESlateVisibility::Collapsed);
+	if (KeyHintPanel) KeyHintPanel->SetVisibility(ESlateVisibility::Collapsed);
+	if (HudText) HudText->SetVisibility(ESlateVisibility::Collapsed);
+	if (FeedbackText) FeedbackText->SetVisibility(ESlateVisibility::Collapsed);
 	if (CameraPhotoPanel)
 	{
-		CameraPhotoPanel->SetVisibility(Photo ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
-		if (CameraPhotoPanel->GetParent())
-		{
-			if (UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(CameraPhotoPanel->Slot))
-			{
-				// Position near lower right-centre
-				CanvasSlot->SetAnchors(FAnchors(0.7f, 0.7f));
-				CanvasSlot->SetAlignment(FVector2D(0.5f, 0.5f));
-			}
-		}
+		CameraPhotoPanel->SetVisibility(ESlateVisibility::HitTestInvisible);
 	}
 }
 
-void UMandaMelaGameplayWidget::ShowCameraPhotoCard(UTextureRenderTarget2D* Photo, const FText& TargetNumber, float DisplayDuration)
+void UMandaMelaGameplayWidget::SetCameraPhotoStatus(const FText& Status)
 {
-	if (CameraPhotoImageWidget && Photo)
+	if (CameraPhotoStatusText)
 	{
-		CameraPhotoImageWidget->SetBrushResourceObject(Photo);
+		CameraPhotoStatusText->SetText(Status);
 	}
-	if (CameraPhotoNumberText)
+}
+
+void UMandaMelaGameplayWidget::SetCameraModeVisible(bool bVisible)
+{
+	if (CameraModePanel)
 	{
-		CameraPhotoNumberText->SetText(TargetNumber);
+		CameraModePanel->SetVisibility(bVisible ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
 	}
-	if (CameraPhotoPanel)
+}
+
+void UMandaMelaGameplayWidget::SetCameraModeStatus(const FText& Status)
+{
+	if (CameraModeStatusText)
 	{
-		CameraPhotoPanel->SetRenderOpacity(0.0f);
-		CameraPhotoPanel->SetVisibility(ESlateVisibility::HitTestInvisible);
-		if (UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(CameraPhotoPanel->Slot))
-		{
-			CanvasSlot->SetAnchors(FAnchors(0.7f, 0.7f));
-			CanvasSlot->SetAlignment(FVector2D(0.5f, 0.5f));
-		}
-		// Simple fade-in effect
-		GetWorld()->GetTimerManager().SetTimerForNextTick(FTimerDelegate::CreateWeakLambda(this, [this]()
-		{
-			if (CameraPhotoPanel)
-			{
-				CameraPhotoPanel->SetRenderOpacity(1.0f);
-			}
-		}));
-		FTimerHandle HideHandle;
-		GetWorld()->GetTimerManager().SetTimer(HideHandle, this, &UMandaMelaGameplayWidget::HideCameraPhotoCard, FMath::Max(1.0f, DisplayDuration), false);
+		CameraModeStatusText->SetText(Status);
+	}
+}
+
+void UMandaMelaGameplayWidget::SetKeyHint(const FText& Hint)
+{
+	if (KeyHintText)
+	{
+		KeyHintText->SetText(Hint);
 	}
 }
 
 void UMandaMelaGameplayWidget::HideCameraPhotoCard()
 {
+	if (CameraPhotoBackdrop)
+	{
+		CameraPhotoBackdrop->SetVisibility(ESlateVisibility::Collapsed);
+	}
+	if (CameraPhotoBlur)
+	{
+		CameraPhotoBlur->SetVisibility(ESlateVisibility::Collapsed);
+	}
 	if (CameraPhotoPanel)
 	{
 		CameraPhotoPanel->SetVisibility(ESlateVisibility::Collapsed);
 	}
+	if (GuessPanel) GuessPanel->SetVisibility(ESlateVisibility::HitTestInvisible);
+	if (QuickbarPanel) QuickbarPanel->SetVisibility(ESlateVisibility::HitTestInvisible);
+	if (KeyHintPanel) KeyHintPanel->SetVisibility(ESlateVisibility::HitTestInvisible);
+	if (HudText) HudText->SetVisibility(ESlateVisibility::HitTestInvisible);
+	if (FeedbackText) FeedbackText->SetVisibility(ESlateVisibility::HitTestInvisible);
 }
 
 void UMandaMelaGameplayWidget::StartFlashEffect(float Intensity, const FLinearColor& WarmTint)

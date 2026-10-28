@@ -20,6 +20,7 @@ class APlayerState;
 class USoundBase;
 class UPrimitiveComponent;
 class UCameraComponent;
+class UTextureRenderTarget2D;
 struct FInputActionValue;
 
 UCLASS(abstract)
@@ -68,6 +69,9 @@ public:
 	void MM_Suicide();
 
 	UFUNCTION(Exec)
+	void MM_GiveCamera();
+
+	UFUNCTION(Exec)
 	void MM_TestFlash(float Intensity = 1.0f);
 
 	UFUNCTION(Client, Reliable)
@@ -86,7 +90,19 @@ public:
 	void ClientUseBinoculars(float Duration);
 
 	UFUNCTION(Client, Reliable)
-	void ClientStoreCameraRecord(int32 Number);
+	void ClientStoreCameraRecord();
+
+	UFUNCTION(Client, Reliable)
+	void ClientEnterCameraMode();
+
+	UFUNCTION(Client, Reliable)
+	void ClientCameraPhotoCaptureFailed(const FString& Message);
+
+	UFUNCTION(Client, Reliable)
+	void ClientEndCameraMode(const FString& Message);
+
+	UFUNCTION(Client, Reliable)
+	void ClientCameraPhotoAnswerResult(bool bCorrect, bool bTargetAvailable, const FString& Message);
 
 	UFUNCTION(Client, Reliable)
 	void ClientApplyFlash(float Intensity, float Duration);
@@ -141,6 +157,17 @@ private:
 	bool bFlashPostProcessSaved = false;
 	bool bDeathmatchSpectating = false;
 	bool bBinocularSavedVisibility = false;
+	bool bCameraPhotoEntryActive = false;
+	bool bCameraPhotoTargetAvailable = false;
+	bool bCameraPhotoAnswerPending = false;
+	bool bCameraModeActive = false;
+	bool bCameraPhotoCapturePending = false;
+	bool bCameraRightMouseHeld = false;
+	bool bCameraModeHidesCharacter = false;
+	bool bCameraModePreviousActorHidden = false;
+	UPROPERTY(Transient)
+	TObjectPtr<UTextureRenderTarget2D> CameraPhotoRenderTarget;
+	float CameraModeOriginalFOV = 90.0f;
 	float NormalCameraFOV = 90.0f;
 	float NormalSpringArmLength = 400.0f;
 	float NormalCameraLocationZ = 0.0f;
@@ -156,12 +183,14 @@ private:
 	FTimerHandle FlashTimer;
 	FTimerHandle BinocularTimer;
 	FTimerHandle FeedbackTimer;
-	FTimerHandle CameraRecordTimer;
 	FTimerHandle DeathNoticeTimer;
 	TWeakObjectPtr<AMandaMelaCharacter> BinocularPawn;
+	TWeakObjectPtr<AMandaMelaCharacter> CameraModePawn;
 	TWeakObjectPtr<UCameraComponent> FlashCamera;
 	TArray<bool> BinocularMeshVisibility;
 	TArray<TWeakObjectPtr<UPrimitiveComponent>> BinocularMeshComponents;
+	TArray<bool> CameraModePreviousVisibility;
+	TArray<TWeakObjectPtr<UPrimitiveComponent>> CameraModeHiddenComponents;
 
 	UInputAction* AddRuntimeAction(FName Name, const TArray<FKey>& Keys);
 	void SetupGameplayInput();
@@ -171,7 +200,6 @@ private:
 	void UseSlot(int32 Slot);
 	void UseSelectedSlot();
 	void DropSelectedItem();
-	AMandaMelaCharacter* TraceTarget() const;
 	AMandaMelaPickup* FindNearbyPickup() const;
 	void RefreshHud();
 	void StartFlashEffect(float Intensity, float Duration);
@@ -180,15 +208,27 @@ private:
 	float GetCurrentFlashIntensity() const;
 	void ApplyFlashPostProcess(float Intensity);
 	void RestoreBinoculars();
+	void HideCharacterForCamera();
+	void RestoreCharacterAfterCamera();
 	void ApplyBinocularView();
 	void ClearBinocularView();
-	void CaptureCameraPhoto(int32 Number);
-	void ClearCameraRecord();
+	UTextureRenderTarget2D* CaptureCameraPhotoScene();
+	void CloseCameraMode();
+	void CloseCameraPhoto();
 	void RefreshSpectatorTargets();
 	void CycleSpectatorTarget(int32 Direction);
 
 	UFUNCTION(Server, Reliable)
 	void ServerSubmitGuess(const FString& Digits);
+
+	UFUNCTION(Server, Reliable)
+	void ServerSubmitCameraPhotoAnswer(const FString& Digits);
+
+	UFUNCTION(Server, Reliable)
+	void ServerCaptureCameraPhoto();
+
+	UFUNCTION(Server, Reliable)
+	void ServerCancelCameraPhoto();
 
 	UFUNCTION(Server, Reliable)
 	void ServerSelectMatchMode(EMandaMelaMatchMode Mode);
@@ -232,6 +272,9 @@ private:
 	UFUNCTION() void InputInteract();
 	UFUNCTION() void InputCycleSlot();
 	UFUNCTION() void InputUseSelectedSlot();
+	void InputCameraHoldPressed();
+	void InputCameraHoldReleased();
 	UFUNCTION() void InputDropItem();
+	UFUNCTION() void InputCapturePhoto();
 	void InputDigit(const FInputActionValue& Value, int32 Digit);
 };

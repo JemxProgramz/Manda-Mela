@@ -21,6 +21,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "Sound/SoundBase.h"
 #include "Camera/CameraComponent.h"
+#include "Camera/PlayerCameraManager.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "Components/SceneCaptureComponent2D.h"
 #include "Components/TextRenderComponent.h"
@@ -94,12 +95,12 @@ void AMandaMelaPlayerController::BeginPlay()
 
 void AMandaMelaPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	RestoreCharacterAfterCamera();
 	RestoreBinoculars();
 	ClearFlashEffect();
 	GetWorldTimerManager().ClearTimer(HudRefreshTimer);
 	GetWorldTimerManager().ClearTimer(BinocularTimer);
 	GetWorldTimerManager().ClearTimer(FeedbackTimer);
-	GetWorldTimerManager().ClearTimer(CameraRecordTimer);
 	GetWorldTimerManager().ClearTimer(DeathNoticeTimer);
 	if (IsLocalController() && RuntimeMappingContext)
 	{
@@ -116,6 +117,9 @@ void AMandaMelaPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReaso
 
 void AMandaMelaPlayerController::OnPossess(APawn* InPawn)
 {
+	if (bCameraModeActive) CloseCameraMode();
+	if (bCameraPhotoEntryActive) CloseCameraPhoto();
+	RestoreCharacterAfterCamera();
 	RestoreBinoculars();
 	ClearFlashEffect();
 	Super::OnPossess(InPawn);
@@ -123,6 +127,9 @@ void AMandaMelaPlayerController::OnPossess(APawn* InPawn)
 
 void AMandaMelaPlayerController::OnUnPossess()
 {
+	if (bCameraModeActive) CloseCameraMode();
+	if (bCameraPhotoEntryActive) CloseCameraPhoto();
+	RestoreCharacterAfterCamera();
 	RestoreBinoculars();
 	ClearFlashEffect();
 	Super::OnUnPossess();
@@ -215,6 +222,13 @@ void AMandaMelaPlayerController::SetupGameplayInput()
 	BindNoArg(TEXT("CycleSlotUp"), { EKeys::MouseScrollUp }, &AMandaMelaPlayerController::InputCycleSlot);
 	BindNoArg(TEXT("CycleSlotDown"), { EKeys::MouseScrollDown }, &AMandaMelaPlayerController::InputCycleSlot);
 	BindNoArg(TEXT("UseSelectedSlot"), { EKeys::F }, &AMandaMelaPlayerController::InputUseSelectedSlot);
+	if (UInputAction* CameraHoldAction = AddRuntimeAction(TEXT("UseCameraHold"), { EKeys::RightMouseButton }))
+	{
+		EnhancedInput->BindAction(CameraHoldAction, ETriggerEvent::Started, this, &AMandaMelaPlayerController::InputCameraHoldPressed);
+		EnhancedInput->BindAction(CameraHoldAction, ETriggerEvent::Completed, this, &AMandaMelaPlayerController::InputCameraHoldReleased);
+		EnhancedInput->BindAction(CameraHoldAction, ETriggerEvent::Canceled, this, &AMandaMelaPlayerController::InputCameraHoldReleased);
+	}
+	BindNoArg(TEXT("CaptureCameraPhoto"), { EKeys::LeftMouseButton }, &AMandaMelaPlayerController::InputCapturePhoto);
 	BindNoArg(TEXT("DropItem"), { EKeys::G }, &AMandaMelaPlayerController::InputDropItem);
 	BindNoArg(TEXT("SpectatorPrevious"), { EKeys::PageUp }, &AMandaMelaPlayerController::InputSpectatorPrevious);
 	BindNoArg(TEXT("SpectatorNext"), { EKeys::PageDown }, &AMandaMelaPlayerController::InputSpectatorNext);
@@ -237,6 +251,14 @@ void AMandaMelaPlayerController::SetupGameplayInput()
 
 void AMandaMelaPlayerController::AddGuessDigit(int32 Digit)
 {
+	if (bCameraModeActive) return;
+	if (bCameraPhotoEntryActive)
+	{
+		if (!bCameraPhotoTargetAvailable || bCameraPhotoAnswerPending || Digit < 0 || Digit > 9 || GuessDigits.Len() >= 4) return;
+		GuessDigits.AppendChar(static_cast<TCHAR>('0' + Digit));
+		if (GameplayWidget) GameplayWidget->SetGuessText(GuessDigits);
+		return;
+	}
 	const AMandaMelaPlayerState* MatchPlayerState = GetPlayerState<AMandaMelaPlayerState>();
 	const AMandaMelaGameState* MatchState = GetWorld() ? GetWorld()->GetGameState<AMandaMelaGameState>() : nullptr;
 	if (bPauseMenuOpen || Digit < 0 || Digit > 9 || GuessDigits.Len() >= 4 || bSubmissionPending
@@ -251,7 +273,7 @@ void AMandaMelaPlayerController::AddGuessDigit(int32 Digit)
 
 void AMandaMelaPlayerController::BackspaceGuess()
 {
-	if (!bSubmissionPending && !GuessDigits.IsEmpty())
+	if (!bCameraModeActive && !bCameraPhotoAnswerPending && !bSubmissionPending && !GuessDigits.IsEmpty())
 	{
 		GuessDigits.LeftChopInline(1);
 		if (GameplayWidget) GameplayWidget->SetGuessText(GuessDigits);
@@ -260,12 +282,27 @@ void AMandaMelaPlayerController::BackspaceGuess()
 
 void AMandaMelaPlayerController::ClearGuess()
 {
+	if (bCameraModeActive || bCameraPhotoAnswerPending) return;
 	GuessDigits.Reset();
 	if (GameplayWidget) GameplayWidget->SetGuessText(GuessDigits);
 }
 
 void AMandaMelaPlayerController::SubmitGuess()
 {
+	if (bCameraModeActive) return;
+	if (bCameraPhotoEntryActive)
+	{
+		if (!bCameraPhotoTargetAvailable || bCameraPhotoAnswerPending) return;
+		if (GuessDigits.Len() != 4)
+		{
+			if (GameplayWidget) GameplayWidget->SetCameraPhotoStatus(FText::FromString(TEXT("Enter exactly four digits.")));
+			return;
+		}
+		bCameraPhotoAnswerPending = true;
+		if (GameplayWidget) GameplayWidget->SetCameraPhotoStatus(FText::FromString(TEXT("Checking number...")));
+		ServerSubmitCameraPhotoAnswer(GuessDigits);
+		return;
+	}
 	if (bPauseMenuOpen)
 	{
 		return;
@@ -313,6 +350,26 @@ void AMandaMelaPlayerController::MM_Suicide()
 	ServerDebugSelfEliminate();
 }
 
+void AMandaMelaPlayerController::MM_GiveCamera()
+{
+	if (GetNetMode() != NM_Standalone)
+	{
+		ClientGameplayFeedback(TEXT("MM_GiveCamera is available only in standalone testing."));
+		return;
+	}
+
+	AMandaMelaPlayerState* MatchPlayerState = GetPlayerState<AMandaMelaPlayerState>();
+	const int32 EmptySlot = MatchPlayerState && MatchPlayerState->GetInventoryItem(0) != EMandaMelaItemType::None ? 1 : 0;
+	if (!MatchPlayerState || MatchPlayerState->GetInventoryItem(EmptySlot) != EMandaMelaItemType::None || !MatchPlayerState->TryAddItem(EMandaMelaItemType::Camera))
+	{
+		ClientGameplayFeedback(TEXT("Could not add Camera; player must be alive with an empty slot."));
+		return;
+	}
+
+	SetSelectedInventorySlotFromServer(EmptySlot);
+	ClientGameplayFeedback(TEXT("Camera added for testing."));
+}
+
 void AMandaMelaPlayerController::MM_TestFlash(float Intensity)
 {
 	const float TestIntensity = FMath::Clamp(Intensity, 0.0f, 1.0f);
@@ -334,6 +391,7 @@ void AMandaMelaPlayerController::ClientWatchSpectatorTarget_Implementation(AActo
 
 void AMandaMelaPlayerController::ClientShowDeathNotice_Implementation(const FString& Message)
 {
+	RestoreCharacterAfterCamera();
 	RestoreBinoculars();
 	ClearFlashEffect();
 	SpectatorDeathMessage = Message;
@@ -369,6 +427,7 @@ void AMandaMelaPlayerController::ServerDebugSelfEliminate_Implementation()
 
 void AMandaMelaPlayerController::RequestMatchMode(EMandaMelaMatchMode Mode)
 {
+	if (bCameraModeActive || bCameraPhotoEntryActive) return;
 	const AMandaMelaGameState* MatchState = GetWorld() ? GetWorld()->GetGameState<AMandaMelaGameState>() : nullptr;
 	if (MatchState && MatchState->GetMatchPhase() != EMandaMelaMatchPhase::InProgress)
 	{
@@ -378,30 +437,10 @@ void AMandaMelaPlayerController::RequestMatchMode(EMandaMelaMatchMode Mode)
 
 void AMandaMelaPlayerController::RequestStartMatch()
 {
-	if (!bPauseMenuOpen && !bSubmissionPending)
+	if (!bPauseMenuOpen && !bSubmissionPending && !bCameraPhotoEntryActive && !bCameraModeActive)
 	{
 		ServerStartMatch();
 	}
-}
-
-AMandaMelaCharacter* AMandaMelaPlayerController::TraceTarget() const
-{
-	FVector ViewLocation;
-	FRotator ViewRotation;
-	GetPlayerViewPoint(ViewLocation, ViewRotation);
-	FHitResult Hit;
-	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(MandaMelaClientTarget), false, GetPawn());
-	if (GetWorld()->LineTraceSingleByChannel(Hit, ViewLocation, ViewLocation + ViewRotation.Vector() * 5000.0f, ECC_Visibility, QueryParams))
-	{
-		if (AMandaMelaCharacter* Target = Cast<AMandaMelaCharacter>(Hit.GetActor()); Target && Target != GetPawn())
-		{
-			if (const AMandaMelaPlayerState* TargetState = Target->GetPlayerState<AMandaMelaPlayerState>(); TargetState && TargetState->IsAlive())
-			{
-				return Target;
-			}
-		}
-	}
-	return nullptr;
 }
 
 AMandaMelaPickup* AMandaMelaPlayerController::FindNearbyPickup() const
@@ -435,7 +474,7 @@ AMandaMelaPickup* AMandaMelaPlayerController::FindNearbyPickup() const
 
 void AMandaMelaPlayerController::Interact()
 {
-	if (bPauseMenuOpen)
+	if (bPauseMenuOpen || bCameraPhotoEntryActive || bCameraModeActive)
 	{
 		return;
 	}
@@ -451,7 +490,7 @@ void AMandaMelaPlayerController::Interact()
 
 void AMandaMelaPlayerController::SelectSlot(int32 Slot)
 {
-	if (Slot >= 0 && Slot <= 1)
+	if (!bCameraPhotoEntryActive && !bCameraModeActive && Slot >= 0 && Slot <= 1)
 	{
 		SelectedInventorySlot = Slot;
 		RefreshHud();
@@ -500,12 +539,12 @@ void AMandaMelaPlayerController::RefreshHeldTacticalItem(bool bSelectOtherIfEmpt
 
 void AMandaMelaPlayerController::CycleSelectedSlot()
 {
-	SelectSlot((SelectedInventorySlot + 1) % 2);
+	if (!bCameraPhotoEntryActive && !bCameraModeActive) SelectSlot((SelectedInventorySlot + 1) % 2);
 }
 
 void AMandaMelaPlayerController::UseSlot(int32 Slot)
 {
-	if (bPauseMenuOpen || Slot < 0 || Slot > 1)
+	if (bPauseMenuOpen || bCameraPhotoEntryActive || bCameraModeActive || Slot < 0 || Slot > 1)
 	{
 		return;
 	}
@@ -513,8 +552,7 @@ void AMandaMelaPlayerController::UseSlot(int32 Slot)
 	{
 		return;
 	}
-	AMandaMelaCharacter* Target = TraceTarget();
-	ServerRequestUseItem(Slot, Target);
+	ServerRequestUseItem(Slot, nullptr);
 }
 
 void AMandaMelaPlayerController::UseSelectedSlot()
@@ -524,7 +562,7 @@ void AMandaMelaPlayerController::UseSelectedSlot()
 
 void AMandaMelaPlayerController::DropSelectedItem()
 {
-	if (bPauseMenuOpen)
+	if (bPauseMenuOpen || bCameraPhotoEntryActive || bCameraModeActive)
 	{
 		return;
 	}
@@ -545,14 +583,14 @@ void AMandaMelaPlayerController::RefreshHud()
 	{
 		ClearFlashEffect();
 	}
-	if (!GameplayWidget)
-	{
-		return;
-	}
 	const bool bRoundAllowsMovement = !MatchState || MatchState->GetMatchPhase() != EMandaMelaMatchPhase::Ended;
 	const bool bPlayerAlive = !MatchPlayerState || !MatchPlayerState->IsParticipating() || MatchPlayerState->IsAlive();
 	SetIgnoreMoveInput(bPauseMenuOpen || !bRoundAllowsMovement || !bPlayerAlive);
 	SetIgnoreLookInput(bPauseMenuOpen || !bRoundAllowsMovement || !bPlayerAlive);
+	if (!GameplayWidget)
+	{
+		return;
+	}
 	FString Status = TEXT("Waiting for host to start");
 	if (Phase == EMandaMelaMatchPhase::Waiting)
 	{
@@ -666,8 +704,12 @@ void AMandaMelaPlayerController::RefreshHud()
 		RefreshSpectatorTargets();
 	}
 	GameplayWidget->SetFeedback(FText::FromString(LastFeedback));
+	if (!bCameraPhotoEntryActive && !bCameraModeActive)
+	{
+		GameplayWidget->SetKeyHint(FText::FromString(TEXT("TYPE 0-9   |   ENTER SUBMIT   |   BACKSPACE DELETE   |   TAB SCOREBOARD")));
+	}
 	FString Prompt;
-	if (MatchPlayerState && MatchPlayerState->IsAlive()
+	if (!bCameraModeActive && MatchPlayerState && MatchPlayerState->IsAlive()
 		&& MatchState && MatchState->GetMatchPhase() == EMandaMelaMatchPhase::InProgress)
 	{
 		if (AMandaMelaPickup* Pickup = FindNearbyPickup())
@@ -680,9 +722,18 @@ void AMandaMelaPlayerController::RefreshHud()
 		}
 		else
 		{
-			Prompt = MatchState->GetMatchMode() == EMandaMelaMatchMode::CaptureTheFlag
-				? TEXT("Touch enemy flag  |  Return dropped flag  |  Bring it home to capture  |  0-9 guess  |  Enter submit  |  Tab scoreboard")
-				: TEXT("Gear spawns near players  |  E pick up  |  Scroll slots  |  F use/throw  |  G drop");
+			if (MatchState->GetMatchMode() == EMandaMelaMatchMode::CaptureTheFlag)
+			{
+				Prompt = TEXT("Touch enemy flag  |  Return dropped flag  |  Bring it home to capture  |  0-9 guess  |  Enter submit  |  Tab scoreboard");
+			}
+			else if (MatchPlayerState->GetInventoryItem(SelectedInventorySlot) == EMandaMelaItemType::Camera)
+			{
+				Prompt = TEXT("Hold right click to use camera  |  E pick up  |  Scroll slots  |  G drop");
+			}
+			else
+			{
+				Prompt = TEXT("Gear spawns near players  |  E pick up  |  Scroll slots  |  F use/throw  |  G drop");
+			}
 		}
 	}
 	GameplayWidget->SetMatchHud(FText::FromString(Status), FText::FromString(Prompt));
@@ -720,6 +771,65 @@ void AMandaMelaPlayerController::ClearBinocularView()
 	BinocularMeshVisibility.Empty();
 }
 
+void AMandaMelaPlayerController::HideCharacterForCamera()
+{
+	if (bCameraModeHidesCharacter) return;
+	AMandaMelaCharacter* ControlledCharacter = Cast<AMandaMelaCharacter>(GetPawn());
+	if (!ControlledCharacter) return;
+	bCameraModePreviousActorHidden = ControlledCharacter->IsHidden();
+	ControlledCharacter->SetActorHiddenInGame(true);
+	if (UCameraComponent* Camera = ControlledCharacter->GetFollowCamera())
+	{
+		CameraModeOriginalFOV = Camera->FieldOfView;
+		Camera->SetFieldOfView(40.0f);
+	}
+
+	TArray<UPrimitiveComponent*> Components;
+	ControlledCharacter->GetBinocularVisualComponents(Components);
+	CameraModePawn = ControlledCharacter;
+	CameraModeHiddenComponents.Empty();
+	CameraModePreviousVisibility.Empty();
+	for (UPrimitiveComponent* Component : Components)
+	{
+		if (!Component) continue;
+		CameraModeHiddenComponents.Add(Component);
+		CameraModePreviousVisibility.Add(Component->IsVisible());
+	}
+	for (const TWeakObjectPtr<UPrimitiveComponent>& Component : CameraModeHiddenComponents)
+	{
+		if (UPrimitiveComponent* VisibleComponent = Component.Get())
+		{
+			VisibleComponent->SetVisibility(false, true);
+		}
+	}
+	bCameraModeHidesCharacter = true;
+}
+
+void AMandaMelaPlayerController::RestoreCharacterAfterCamera()
+{
+	if (!bCameraModeHidesCharacter) return;
+	for (int32 Index = 0; Index < CameraModeHiddenComponents.Num() && Index < CameraModePreviousVisibility.Num(); ++Index)
+	{
+		if (UPrimitiveComponent* Component = CameraModeHiddenComponents[Index].Get())
+		{
+			Component->SetVisibility(CameraModePreviousVisibility[Index], true);
+		}
+	}
+	if (AMandaMelaCharacter* CameraModeCharacter = CameraModePawn.Get())
+	{
+		CameraModeCharacter->SetActorHiddenInGame(bCameraModePreviousActorHidden);
+		if (UCameraComponent* Camera = CameraModeCharacter->GetFollowCamera())
+		{
+			Camera->SetFieldOfView(CameraModeOriginalFOV);
+		}
+		CameraModeCharacter->RefreshBinocularVisuals();
+	}
+	CameraModePawn.Reset();
+	CameraModeHiddenComponents.Empty();
+	CameraModePreviousVisibility.Empty();
+	bCameraModeHidesCharacter = false;
+}
+
 void AMandaMelaPlayerController::RestoreBinoculars()
 {
 	if (!bBinocularsActive)
@@ -742,13 +852,13 @@ void AMandaMelaPlayerController::RestoreBinoculars()
 	bBinocularsActive = false;
 }
 
-void AMandaMelaPlayerController::CaptureCameraPhoto(int32 Number)
+UTextureRenderTarget2D* AMandaMelaPlayerController::CaptureCameraPhotoScene()
 {
 	AMandaMelaCharacter* ControlledPawn = Cast<AMandaMelaCharacter>(GetPawn());
 	UCameraComponent* Camera = ControlledPawn ? ControlledPawn->GetFollowCamera() : nullptr;
-	if (!Camera || !GameplayWidget)
+	if (!Camera)
 	{
-		return;
+		return nullptr;
 	}
 
 	USceneCaptureComponent2D* CameraPhotoCapture = ControlledPawn->FindComponentByClass<USceneCaptureComponent2D>();
@@ -757,32 +867,93 @@ void AMandaMelaPlayerController::CaptureCameraPhoto(int32 Number)
 		CameraPhotoCapture = NewObject<USceneCaptureComponent2D>(ControlledPawn, TEXT("CameraPhotoCapture"), RF_Transient);
 		CameraPhotoCapture->SetupAttachment(Camera);
 		CameraPhotoCapture->RegisterComponent();
-		CameraPhotoCapture->bCaptureEveryFrame = false;
-		CameraPhotoCapture->bCaptureOnMovement = false;
-		CameraPhotoCapture->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
 	}
+	CameraPhotoCapture->bCaptureEveryFrame = false;
+	CameraPhotoCapture->bCaptureOnMovement = false;
+	CameraPhotoCapture->bAlwaysPersistRenderingState = true;
+	CameraPhotoCapture->bMainViewFamily = true;
+	CameraPhotoCapture->bInheritMainViewCameraPostProcessSettings = true;
+	CameraPhotoCapture->ShowFlags.SetDynamicShadows(false);
+	CameraPhotoCapture->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
 
-	UTextureRenderTarget2D* CameraPhotoRenderTarget = CameraPhotoCapture->TextureTarget;
-	if (!CameraPhotoRenderTarget)
+	constexpr float CameraFrameWidthFraction = 0.72f;
+	constexpr float CameraFrameHeightFraction = 0.84f;
+	float ViewAspect = FMath::Max(Camera->AspectRatio, 0.01f);
+	if (Camera->bConstrainAspectRatio)
 	{
-		CameraPhotoRenderTarget = NewObject<UTextureRenderTarget2D>(CameraPhotoCapture, TEXT("CameraPhotoRenderTarget"), RF_Transient);
-		CameraPhotoRenderTarget->InitAutoFormat(640, 500);
-		CameraPhotoRenderTarget->ClearColor = FLinearColor::Black;
-		CameraPhotoCapture->TextureTarget = CameraPhotoRenderTarget;
-	}
-	CameraPhotoCapture->FOVAngle = Camera->FieldOfView;
-	CameraPhotoCapture->SetWorldTransform(Camera->GetComponentTransform());
-	CameraPhotoCapture->CaptureScene();
-	if (GameplayWidget->GetClass()->FindFunctionByName(TEXT("ShowCameraPhotoCard")))
-	{
-		GameplayWidget->ShowCameraPhotoCard(CameraPhotoRenderTarget,
-			FText::FromString(FString::Printf(TEXT("%04d"), Number)), 5.0f);
+		ViewAspect = Camera->AspectRatio;
 	}
 	else
 	{
-		GameplayWidget->SetCameraPhoto(CameraPhotoRenderTarget,
-			FText::FromString(FString::Printf(TEXT("%04d"), Number)));
+		int32 ViewportWidth = 0;
+		int32 ViewportHeight = 0;
+		GetViewportSize(ViewportWidth, ViewportHeight);
+		if (ViewportHeight > 0)
+		{
+			ViewAspect = static_cast<float>(ViewportWidth) / ViewportHeight;
+		}
 	}
+	const float PhotoAspect = ViewAspect * CameraFrameWidthFraction / CameraFrameHeightFraction;
+	const int32 PhotoWidth = PhotoAspect >= 1.0f ? 640 : FMath::Max(1, FMath::RoundToInt(640.0f * PhotoAspect));
+	const int32 PhotoHeight = PhotoAspect >= 1.0f ? FMath::Max(1, FMath::RoundToInt(640.0f / PhotoAspect)) : 640;
+	CameraPhotoRenderTarget = CameraPhotoCapture->TextureTarget;
+	if (!CameraPhotoRenderTarget)
+	{
+		CameraPhotoRenderTarget = NewObject<UTextureRenderTarget2D>(CameraPhotoCapture, TEXT("CameraPhotoRenderTarget"), RF_Transient);
+	}
+	if (!CameraPhotoRenderTarget) return nullptr;
+	if (CameraPhotoRenderTarget->SizeX != PhotoWidth || CameraPhotoRenderTarget->SizeY != PhotoHeight)
+	{
+		CameraPhotoRenderTarget->InitAutoFormat(PhotoWidth, PhotoHeight);
+		CameraPhotoRenderTarget->ClearColor = FLinearColor::Black;
+	}
+	CameraPhotoCapture->TextureTarget = CameraPhotoRenderTarget;
+	CameraPhotoCapture->HiddenActors.AddUnique(ControlledPawn);
+
+	FVector ViewLocation;
+	FRotator ViewRotation;
+	GetPlayerViewPoint(ViewLocation, ViewRotation);
+	const float ViewFOV = PlayerCameraManager ? PlayerCameraManager->GetFOVAngle() : Camera->FieldOfView;
+	const float HalfViewFOV = FMath::DegreesToRadians(ViewFOV * 0.5f);
+	const float PhotoHorizontalScale = (static_cast<float>(PhotoWidth) / PhotoHeight) * CameraFrameHeightFraction / ViewAspect;
+	CameraPhotoCapture->FOVAngle = FMath::RadiansToDegrees(2.0f * FMath::Atan(FMath::Tan(HalfViewFOV) * PhotoHorizontalScale));
+	CameraPhotoCapture->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
+	CameraPhotoCapture->SetWorldLocationAndRotation(ViewLocation, ViewRotation);
+	CameraPhotoCapture->CaptureSceneDeferred();
+	return CameraPhotoRenderTarget;
+}
+
+void AMandaMelaPlayerController::CloseCameraMode()
+{
+	bCameraModeActive = false;
+	bCameraPhotoCapturePending = false;
+	bCameraRightMouseHeld = false;
+	RestoreCharacterAfterCamera();
+	if (GameplayWidget)
+	{
+		GameplayWidget->SetCameraModeVisible(false);
+		GameplayWidget->SetKeyHint(FText::FromString(TEXT("TYPE 0-9   |   ENTER SUBMIT   |   BACKSPACE DELETE   |   TAB SCOREBOARD")));
+	}
+	ServerCancelCameraPhoto();
+	RefreshHud();
+}
+
+void AMandaMelaPlayerController::CloseCameraPhoto()
+{
+	bCameraPhotoEntryActive = false;
+	bCameraPhotoTargetAvailable = false;
+	bCameraPhotoAnswerPending = false;
+	bCameraRightMouseHeld = false;
+	RestoreCharacterAfterCamera();
+	GuessDigits.Reset();
+	if (GameplayWidget)
+	{
+		GameplayWidget->SetGuessText(GuessDigits);
+		GameplayWidget->HideCameraPhotoCard();
+		GameplayWidget->SetKeyHint(FText::FromString(TEXT("TYPE 0-9   |   ENTER SUBMIT   |   BACKSPACE DELETE   |   TAB SCOREBOARD")));
+	}
+	ServerCancelCameraPhoto();
+	RefreshHud();
 }
 
 void AMandaMelaPlayerController::ServerSubmitGuess_Implementation(const FString& Digits)
@@ -796,6 +967,30 @@ void AMandaMelaPlayerController::ServerSubmitGuess_Implementation(const FString&
 	if (AMandaMelaGameMode* GameMode = GetWorld()->GetAuthGameMode<AMandaMelaGameMode>())
 	{
 		GameMode->HandleAttack(this, Digits);
+	}
+}
+
+void AMandaMelaPlayerController::ServerSubmitCameraPhotoAnswer_Implementation(const FString& Digits)
+{
+	if (AMandaMelaGameMode* GameMode = GetWorld()->GetAuthGameMode<AMandaMelaGameMode>())
+	{
+		GameMode->HandleCameraPhotoAnswer(this, Digits);
+	}
+}
+
+void AMandaMelaPlayerController::ServerCaptureCameraPhoto_Implementation()
+{
+	if (AMandaMelaGameMode* GameMode = GetWorld()->GetAuthGameMode<AMandaMelaGameMode>())
+	{
+		GameMode->HandleCameraPhotoCapture(this);
+	}
+}
+
+void AMandaMelaPlayerController::ServerCancelCameraPhoto_Implementation()
+{
+	if (AMandaMelaGameMode* GameMode = GetWorld()->GetAuthGameMode<AMandaMelaGameMode>())
+	{
+		GameMode->CancelCameraPhoto(this);
 	}
 }
 
@@ -951,27 +1146,115 @@ void AMandaMelaPlayerController::ClientUseBinoculars_Implementation(float Durati
 	GetWorldTimerManager().SetTimer(BinocularTimer, this, &AMandaMelaPlayerController::RestoreBinoculars, FMath::Clamp(Duration, 0.5f, 8.0f), false);
 }
 
-void AMandaMelaPlayerController::ClientStoreCameraRecord_Implementation(int32 Number)
+void AMandaMelaPlayerController::ClientStoreCameraRecord_Implementation()
 {
-	if (Number >= 0 && Number <= 9999)
+	if (!bCameraModeActive || !GameplayWidget || !CameraPhotoRenderTarget)
 	{
-		CaptureCameraPhoto(Number);
-		GetWorldTimerManager().SetTimer(CameraRecordTimer, this, &AMandaMelaPlayerController::ClearCameraRecord, 5.0f, false);
+		ServerCancelCameraPhoto();
+		return;
 	}
+
+	if (bBinocularsActive)
+	{
+		RestoreBinoculars();
+	}
+	bCameraModeActive = false;
+	bCameraPhotoCapturePending = false;
+	bCameraRightMouseHeld = false;
+	bCameraPhotoEntryActive = true;
+	bCameraPhotoTargetAvailable = true;
+	bCameraPhotoAnswerPending = false;
+	GuessDigits.Reset();
+	GameplayWidget->SetGuessText(GuessDigits);
+	GameplayWidget->SetKeyHint(FText::FromString(TEXT("PHOTO INPUT  |  TYPE 0-9   |   ENTER SUBMIT   |   ESC CANCEL")));
+	GameplayWidget->SetCameraModeVisible(false);
+	GameplayWidget->ShowCameraPhotoCard(CameraPhotoRenderTarget,
+		FText::FromString(TEXT("Enter the number in the photo. Press Enter to submit.")));
+	RefreshHud();
 }
 
-void AMandaMelaPlayerController::ClearCameraRecord()
+void AMandaMelaPlayerController::ClientEnterCameraMode_Implementation()
 {
+	if (!bCameraRightMouseHeld)
+	{
+		CloseCameraMode();
+		return;
+	}
+	if (!GameplayWidget)
+	{
+		ServerCancelCameraPhoto();
+		return;
+	}
+	if (bBinocularsActive)
+	{
+		RestoreBinoculars();
+	}
+	HideCharacterForCamera();
+	bCameraModeActive = true;
+	bCameraPhotoCapturePending = false;
+	GuessDigits.Reset();
+	GameplayWidget->SetGuessText(GuessDigits);
+	GameplayWidget->SetCameraModeVisible(true);
+	GameplayWidget->SetCameraModeStatus(FText::FromString(TEXT("CAMERA READY  /  LEFT CLICK TO TAKE PHOTO")));
+	GameplayWidget->SetKeyHint(FText::FromString(TEXT("MOVE FREELY  |  LEFT CLICK TAKE PHOTO  |  RELEASE RIGHT CLICK TO CLOSE")));
+	RefreshHud();
+}
+
+void AMandaMelaPlayerController::ClientCameraPhotoCaptureFailed_Implementation(const FString& Message)
+{
+	if (!bCameraModeActive) return;
+	bCameraPhotoCapturePending = false;
+	LastFeedback = Message;
 	if (GameplayWidget)
 	{
-		if (GameplayWidget->GetClass()->FindFunctionByName(TEXT("HideCameraPhotoCard")))
+		GameplayWidget->SetCameraModeStatus(FText::FromString(Message));
+	}
+	if (!bCameraRightMouseHeld)
+	{
+		CloseCameraMode();
+		return;
+	}
+	RefreshHud();
+}
+
+void AMandaMelaPlayerController::ClientEndCameraMode_Implementation(const FString& Message)
+{
+	bCameraModeActive = false;
+	bCameraPhotoCapturePending = false;
+	bCameraRightMouseHeld = false;
+	RestoreCharacterAfterCamera();
+	LastFeedback = Message;
+	if (GameplayWidget)
+	{
+		GameplayWidget->SetCameraModeVisible(false);
+		GameplayWidget->SetKeyHint(FText::FromString(TEXT("TYPE 0-9   |   ENTER SUBMIT   |   BACKSPACE DELETE   |   TAB SCOREBOARD")));
+	}
+	RefreshHud();
+}
+
+void AMandaMelaPlayerController::ClientCameraPhotoAnswerResult_Implementation(bool bCorrect, bool bTargetAvailable, const FString& Message)
+{
+	if (!bCameraPhotoEntryActive)
+	{
+		return;
+	}
+	bCameraPhotoAnswerPending = false;
+	bCameraPhotoTargetAvailable = bTargetAvailable;
+	GuessDigits.Reset();
+	if (GameplayWidget) GameplayWidget->SetGuessText(GuessDigits);
+	if (GameplayWidget)
+	{
+		GameplayWidget->SetCameraPhotoStatus(FText::FromString(Message));
+		if (!bTargetAvailable)
 		{
-			GameplayWidget->HideCameraPhotoCard();
+			GameplayWidget->SetKeyHint(FText::FromString(TEXT("PHOTO COMPLETE   |   ESC CLOSE")));
 		}
-		else
-		{
-			GameplayWidget->SetCameraPhoto(nullptr, FText::GetEmpty());
-		}
+		if (bCorrect) GameplayWidget->AddKillFeedMessage(Message);
+	}
+	if (bCorrect)
+	{
+		LastFeedback = Message;
+		CloseCameraPhoto();
 	}
 }
 
@@ -1206,6 +1489,7 @@ void AMandaMelaPlayerController::ClientPlayWarning_Implementation(USoundBase* So
 
 void AMandaMelaPlayerController::InputScoreboardPressed()
 {
+	if (bCameraPhotoEntryActive || bCameraModeActive) return;
 	bScoreboardOpen = true;
 	if (GameplayWidget) GameplayWidget->SetScoreboardVisible(true);
 }
@@ -1218,6 +1502,16 @@ void AMandaMelaPlayerController::InputScoreboardReleased()
 
 void AMandaMelaPlayerController::InputCancel()
 {
+	if (bCameraModeActive)
+	{
+		if (!bCameraPhotoCapturePending) CloseCameraMode();
+		return;
+	}
+	if (bCameraPhotoEntryActive)
+	{
+		CloseCameraPhoto();
+		return;
+	}
 	if (!GuessDigits.IsEmpty())
 	{
 		ClearGuess();
@@ -1238,8 +1532,57 @@ void AMandaMelaPlayerController::InputSelectTeamDeathmatch() { RequestMatchMode(
 void AMandaMelaPlayerController::InputSelectCaptureTheFlag() { RequestMatchMode(EMandaMelaMatchMode::CaptureTheFlag); }
 void AMandaMelaPlayerController::InputInteract() { Interact(); }
 void AMandaMelaPlayerController::InputCycleSlot() { CycleSelectedSlot(); }
-void AMandaMelaPlayerController::InputUseSelectedSlot() { UseSelectedSlot(); }
+void AMandaMelaPlayerController::InputUseSelectedSlot()
+{
+	const AMandaMelaPlayerState* MatchPlayerState = GetPlayerState<AMandaMelaPlayerState>();
+	if (MatchPlayerState && MatchPlayerState->GetInventoryItem(SelectedInventorySlot) == EMandaMelaItemType::Camera)
+	{
+		return;
+	}
+	UseSelectedSlot();
+}
+void AMandaMelaPlayerController::InputCameraHoldPressed()
+{
+	if (bCameraRightMouseHeld || bCameraModeActive || bCameraPhotoEntryActive || bPauseMenuOpen)
+	{
+		return;
+	}
+	const AMandaMelaPlayerState* MatchPlayerState = GetPlayerState<AMandaMelaPlayerState>();
+	if (!MatchPlayerState || MatchPlayerState->GetInventoryItem(SelectedInventorySlot) != EMandaMelaItemType::Camera)
+	{
+		return;
+	}
+	bCameraRightMouseHeld = true;
+	UseSlot(SelectedInventorySlot);
+}
+void AMandaMelaPlayerController::InputCameraHoldReleased()
+{
+	bCameraRightMouseHeld = false;
+	if (bCameraModeActive && !bCameraPhotoCapturePending)
+	{
+		CloseCameraMode();
+	}
+}
 void AMandaMelaPlayerController::InputDropItem() { DropSelectedItem(); }
+void AMandaMelaPlayerController::InputCapturePhoto()
+{
+	if (!bCameraModeActive || bCameraPhotoCapturePending) return;
+	CameraPhotoRenderTarget = CaptureCameraPhotoScene();
+	if (!CameraPhotoRenderTarget)
+	{
+		if (GameplayWidget)
+		{
+			GameplayWidget->SetCameraModeStatus(FText::FromString(TEXT("CAMERA VIEW UNAVAILABLE  /  PRESS ESC")));
+		}
+		return;
+	}
+	bCameraPhotoCapturePending = true;
+	if (GameplayWidget)
+	{
+		GameplayWidget->SetCameraModeStatus(FText::FromString(TEXT("CAPTURING PHOTO...")));
+	}
+	ServerCaptureCameraPhoto();
+}
 void AMandaMelaPlayerController::InputSpectatorPrevious() { CycleSpectatorTarget(-1); }
 void AMandaMelaPlayerController::InputSpectatorNext() { CycleSpectatorTarget(1); }
 void AMandaMelaPlayerController::InputDigit(const FInputActionValue&, int32 Digit) { AddGuessDigit(Digit); }

@@ -5,6 +5,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/SkeletalMesh.h"
+#include "Engine/StaticMesh.h"
 #include "GameFramework/ProjectileMovementComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "NiagaraComponent.h"
@@ -31,12 +32,18 @@ AMandaMelaPickup::AMandaMelaPickup()
 	Mesh->SetupAttachment(RootComponent);
 	Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
+	CameraMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("CameraMesh"));
+	CameraMesh->SetupAttachment(RootComponent);
+	CameraMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	CameraMesh->SetVisibility(false);
+
 	TacticMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("TacticMesh"));
 	TacticMesh->SetupAttachment(RootComponent);
 	TacticMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	TacticMesh->SetVisibility(false);
 
 	static ConstructorHelpers::FObjectFinder<USkeletalMesh> BinocularsMeshAsset(TEXT("/Game/Tactics/binocular1.binocular1"));
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> CameraMeshAsset(TEXT("/Game/Tactics/camera/Camera_GameReady/Camera_GameReady.Camera_GameReady"));
 	static ConstructorHelpers::FObjectFinder<USkeletalMesh> FlashbangMeshAsset(TEXT("/Game/Tactics/flashbang.flashbang"));
 	static ConstructorHelpers::FObjectFinder<USkeletalMesh> SmokeBombMeshAsset(TEXT("/Game/Tactics/smoke.smoke"));
 	if (BinocularsMeshAsset.Succeeded())
@@ -46,6 +53,14 @@ AMandaMelaPickup::AMandaMelaPickup()
 	else
 	{
 		UE_LOG(LogTemp, Error, TEXT("Could not load tactical pickup mesh: /Game/Tactics/binocular1.binocular1"));
+	}
+	if (CameraMeshAsset.Succeeded())
+	{
+		CameraModel = CameraMeshAsset.Object;
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("Could not load tactical pickup mesh: /Game/Tactics/camera/Camera_GameReady/Camera_GameReady.Camera_GameReady"));
 	}
 	if (FlashbangMeshAsset.Succeeded())
 	{
@@ -113,22 +128,31 @@ void AMandaMelaPickup::OnRep_ItemType()
 
 void AMandaMelaPickup::UpdateItemPresentation()
 {
-	// Hide the static mesh and show/swap the skeletal mesh based on the item type.
+	// Show the default item mesh, the rigid camera, or the skeletal tactical mesh.
 	bool bShowTactic = false;
+	float TargetSize = 0.0f;
 	USkeletalMesh* DesiredMesh = nullptr;
 
 	switch (ItemType)
 	{
 	case EMandaMelaItemType::Binoculars:
 		DesiredMesh = BinocularsModel;
+		TargetSize = 24.0f;
+		bShowTactic = true;
+		break;
+	case EMandaMelaItemType::Camera:
+		TargetSize = 24.0f;
 		bShowTactic = true;
 		break;
 	case EMandaMelaItemType::Flashbang:
+	case EMandaMelaItemType::SoundDecoy:
 		DesiredMesh = FlashbangModel;
+		TargetSize = 18.0f;
 		bShowTactic = true;
 		break;
 	case EMandaMelaItemType::SmokeBomb:
 		DesiredMesh = SmokeBombModel;
+		TargetSize = 21.0f;
 		bShowTactic = true;
 		break;
 	default:
@@ -137,16 +161,35 @@ void AMandaMelaPickup::UpdateItemPresentation()
 
 	if (TacticMesh)
 	{
-		TacticMesh->SetVisibility(bShowTactic);
 		if (bShowTactic && DesiredMesh)
 		{
+			const FBoxSphereBounds Bounds = DesiredMesh->GetBounds();
+			const float LongestDimension = Bounds.BoxExtent.GetAbs().GetMax() * 2.0f;
+			const float Scale = LongestDimension > KINDA_SMALL_NUMBER ? TargetSize / LongestDimension : 1.0f;
 			TacticMesh->SetSkeletalMesh(DesiredMesh);
+			TacticMesh->SetRelativeScale3D(FVector(Scale));
+			TacticMesh->SetRelativeLocation(-Bounds.Origin * Scale);
 		}
+		TacticMesh->SetVisibility(bShowTactic && DesiredMesh != nullptr);
 	}
 
 	if (Mesh)
 	{
 		Mesh->SetVisibility(!bShowTactic);
+	}
+
+	if (CameraMesh)
+	{
+		if (ItemType == EMandaMelaItemType::Camera && CameraModel)
+		{
+			const FBoxSphereBounds Bounds = CameraModel->GetBounds();
+			const float LongestDimension = Bounds.BoxExtent.GetAbs().GetMax() * 2.0f;
+			const float Scale = LongestDimension > KINDA_SMALL_NUMBER ? 24.0f / LongestDimension : 1.0f;
+			CameraMesh->SetStaticMesh(CameraModel);
+			CameraMesh->SetRelativeScale3D(FVector(Scale));
+			CameraMesh->SetRelativeLocation(-Bounds.Origin * Scale);
+		}
+		CameraMesh->SetVisibility(ItemType == EMandaMelaItemType::Camera && CameraModel != nullptr);
 	}
 }
 

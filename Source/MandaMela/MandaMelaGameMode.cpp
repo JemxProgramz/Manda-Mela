@@ -9,10 +9,12 @@
 #include "MandaMelaPlayerController.h"
 #include "Engine/World.h"
 #include "Components/CapsuleComponent.h"
+#include "Camera/CameraComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/GameStateBase.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/PlayerStart.h"
+#include "AIController.h"
 #include "EngineUtils.h"
 #include "NavigationSystem.h"
 #include "NiagaraSystem.h"
@@ -158,6 +160,11 @@ void AMandaMelaGameMode::SpawnOfflineBots(APlayerController* LocalPlayer)
 
 void AMandaMelaGameMode::Logout(AController* Exiting)
 {
+	if (AMandaMelaPlayerController* LeavingController = Cast<AMandaMelaPlayerController>(Exiting))
+	{
+		ActiveCameraSessions.Remove(TWeakObjectPtr<AMandaMelaPlayerController>(LeavingController));
+		PendingCameraPhotos.Remove(TWeakObjectPtr<AMandaMelaPlayerController>(LeavingController));
+	}
 	AMandaMelaPlayerState* LeavingPlayer = Exiting ? Exiting->GetPlayerState<AMandaMelaPlayerState>() : nullptr;
 	const bool bWasParticipating = LeavingPlayer && LeavingPlayer->IsParticipating();
 	Super::Logout(Exiting);
@@ -209,6 +216,22 @@ void AMandaMelaGameMode::StartMatchInternal(EMandaMelaMatchMode Mode)
 		return;
 	}
 	GetWorldTimerManager().ClearTimer(MatchClockTimer);
+	for (TPair<TWeakObjectPtr<AMandaMelaPlayerController>, FMandaMelaPendingCameraPhoto>& Entry : PendingCameraPhotos)
+	{
+		if (AMandaMelaPlayerController* PhotoOwner = Entry.Key.Get())
+		{
+			PhotoOwner->ClientCameraPhotoAnswerResult(false, false, TEXT("The round changed. Press Esc to close the photo."));
+		}
+	}
+	PendingCameraPhotos.Reset();
+	for (const TPair<TWeakObjectPtr<AMandaMelaPlayerController>, int32>& Entry : ActiveCameraSessions)
+	{
+		if (AMandaMelaPlayerController* CameraOwner = Entry.Key.Get())
+		{
+			CameraOwner->ClientEndCameraMode(TEXT("The round changed. Camera cancelled."));
+		}
+	}
+	ActiveCameraSessions.Reset();
 	MatchState->ResetForRound(Mode);
 	AssignTeamsForMatch();
 	FindTeamBaseLocations(RedBaseLocation, BlueBaseLocation);
@@ -247,7 +270,21 @@ void AMandaMelaGameMode::StartMatchInternal(EMandaMelaMatchMode Mode)
 			{
 				if (APawn* Pawn = PlayerController->GetPawn())
 				{
-					Pawn->TeleportTo(StartSpot->GetActorLocation(), StartSpot->GetActorRotation());
+					if (!Pawn->TeleportTo(StartSpot->GetActorLocation(), StartSpot->GetActorRotation()))
+					{
+						// The pawn may be blocked by the floor, an obstacle, or a teammate at this start.
+						// Recreate it through GameMode so the normal spawn collision adjustment can find space.
+						PlayerController->UnPossess();
+						Pawn->Destroy();
+						if (APlayerStart* PlayerStart = Cast<APlayerStart>(StartSpot))
+						{
+							RestartPlayerAtPlayerStart(PlayerController, PlayerStart);
+						}
+						else
+						{
+							RestartPlayerAtTransform(PlayerController, StartSpot->GetActorTransform());
+						}
+					}
 				}
 			}
 			if (!PlayerController->GetPawn())
@@ -632,6 +669,13 @@ void AMandaMelaGameMode::HandleAttack(AController* Attacker, const FString& Digi
 		SendAttackFeedback(Attacker, false, TEXT("You cannot attack right now."));
 		return;
 	}
+	if (AMandaMelaPlayerController* Player = Cast<AMandaMelaPlayerController>(Attacker);
+		Player && (PendingCameraPhotos.Contains(TWeakObjectPtr<AMandaMelaPlayerController>(Player))
+			|| ActiveCameraSessions.Contains(TWeakObjectPtr<AMandaMelaPlayerController>(Player))))
+	{
+		Player->ClientGameplayFeedback(TEXT("Finish or cancel the camera first."));
+		return;
+	}
 	if (Now < AttackerState->GetCooldownEndServerTime())
 	{
 		SendAttackFeedback(Attacker, false, FString::Printf(TEXT("Cooldown: %d seconds"), FMath::CeilToInt(AttackerState->GetCooldownEndServerTime() - Now)));
@@ -677,55 +721,8 @@ void AMandaMelaGameMode::HandleAttack(AController* Attacker, const FString& Digi
 			SendAttackFeedback(Attacker, false, TEXT("You cannot eliminate a teammate."));
 			return;
 		}
-		DropCarriedFlag(TargetState);
-		TargetState->SetAlive(false);
-		TargetCharacter->ApplyEliminatedState();
-		TargetCharacter->MulticastPlayEliminationEffect();
-		if (AMandaMelaPlayerController* TargetController = Cast<AMandaMelaPlayerController>(TargetState->GetPlayerController()))
-		{
-			TargetController->ClientShowDeathNotice(FString::Printf(TEXT("ELIMINATED BY %s"), *AttackerState->GetPlayerName()));
-		}
-		// UI feedback for attacker is handled via client RPC (ClientAttackFeedback) above; no direct widget manipulation from GameMode.
-		if (MatchState->GetMatchMode() == EMandaMelaMatchMode::Deathmatch)
-		{
-			BeginDeathmatchSpectating(TargetState);
-		}
-		AttackerState->AddElimination();
-		if (MatchState->GetMatchMode() == EMandaMelaMatchMode::TeamDeathmatch)
-		{
-			const EMandaMelaTeam Team = AttackerState->GetTeam();
-			MatchState->SetTeamScore(Team, MatchState->GetTeamScore(Team) + 1);
-		}
+		EliminateTarget(AttackerState, TargetState, TargetCharacter);
 		SendAttackFeedback(Attacker, true, FString::Printf(TEXT("You killed %s"), *TargetState->GetPlayerName()));
-		for (APlayerState* State : MatchState->PlayerArray)
-		{
-			AMandaMelaPlayerState* OtherState = Cast<AMandaMelaPlayerState>(State);
-			if (OtherState && OtherState != AttackerState && OtherState != TargetState && OtherState->IsParticipating())
-			{
-				if (AMandaMelaPlayerController* OtherController = Cast<AMandaMelaPlayerController>(OtherState->GetPlayerController()))
-				{
-					OtherController->ClientGameplayFeedback(TEXT("An opponent was eliminated."));
-				}
-			}
-		}
-		UpdateLivingPlayersAndCheckWinner();
-		if (MatchState->GetMatchPhase() == EMandaMelaMatchPhase::InProgress && bTeamMode)
-		{
-			if (MatchState->GetMatchMode() == EMandaMelaMatchMode::TeamDeathmatch
-				&& MatchState->GetTeamScore(AttackerState->GetTeam()) >= TeamDeathmatchScoreLimit)
-			{
-				EndMatchForTeam(AttackerState->GetTeam());
-			}
-			else
-			{
-				FTimerHandle RespawnTimer;
-				GetWorldTimerManager().SetTimer(RespawnTimer, FTimerDelegate::CreateWeakLambda(this,
-					[this, TargetStateWeak = TWeakObjectPtr<AMandaMelaPlayerState>(TargetState)]()
-					{
-						RespawnTeamPlayer(TargetStateWeak);
-					}), TeamRespawnDelay, false);
-			}
-		}
 		return;
 	}
 
@@ -748,6 +745,192 @@ void AMandaMelaGameMode::HandleAttack(AController* Attacker, const FString& Digi
 	SendAttackFeedback(Attacker, false, TEXT("Wrong number. Attack cooldown: 3 seconds."));
 }
 
+void AMandaMelaGameMode::EliminateTarget(AMandaMelaPlayerState* AttackerState, AMandaMelaPlayerState* TargetState, AMandaMelaCharacter* TargetCharacter)
+{
+	AMandaMelaGameState* MatchState = GetGameState<AMandaMelaGameState>();
+	if (!AttackerState || !TargetState || !TargetCharacter || !MatchState || !HasAuthority()) return;
+
+	const EMandaMelaMatchMode Mode = MatchState->GetMatchMode();
+	const bool bTeamMode = Mode != EMandaMelaMatchMode::Deathmatch;
+	DropCarriedFlag(TargetState);
+	for (TPair<TWeakObjectPtr<AMandaMelaPlayerController>, FMandaMelaPendingCameraPhoto>& Entry : PendingCameraPhotos)
+	{
+		AMandaMelaPlayerController* PhotoOwner = Entry.Key.Get();
+		const bool bOwnerEliminated = PhotoOwner && PhotoOwner->GetPlayerState<AMandaMelaPlayerState>() == TargetState;
+		if (!Entry.Value.bCompleted && (Entry.Value.Target.Get() == TargetCharacter || bOwnerEliminated))
+		{
+			Entry.Value.bCompleted = true;
+			if (PhotoOwner)
+			{
+				PhotoOwner->ClientCameraPhotoAnswerResult(false, false, TEXT("The photographed target or player is no longer available. Press Esc to close."));
+			}
+		}
+	}
+	for (auto It = ActiveCameraSessions.CreateIterator(); It; ++It)
+	{
+		AMandaMelaPlayerController* CameraOwner = It.Key().Get();
+		if (CameraOwner && CameraOwner->GetPlayerState<AMandaMelaPlayerState>() == TargetState)
+		{
+			CameraOwner->ClientEndCameraMode(TEXT("You were eliminated. Camera cancelled."));
+			It.RemoveCurrent();
+		}
+	}
+	if (AAIController* AIController = Cast<AAIController>(TargetCharacter->GetController()))
+	{
+		AIController->StopMovement();
+	}
+	TargetState->SetAlive(false);
+	TargetCharacter->ApplyEliminatedState();
+	TargetCharacter->MulticastPlayEliminationEffect();
+	if (AMandaMelaPlayerController* TargetController = Cast<AMandaMelaPlayerController>(TargetState->GetPlayerController()))
+	{
+		TargetController->ClientShowDeathNotice(FString::Printf(TEXT("ELIMINATED BY %s"), *AttackerState->GetPlayerName()));
+	}
+	if (Mode == EMandaMelaMatchMode::Deathmatch)
+	{
+		BeginDeathmatchSpectating(TargetState);
+	}
+	AttackerState->AddElimination();
+	if (Mode == EMandaMelaMatchMode::TeamDeathmatch)
+	{
+		const EMandaMelaTeam Team = AttackerState->GetTeam();
+		MatchState->SetTeamScore(Team, MatchState->GetTeamScore(Team) + 1);
+	}
+	for (APlayerState* State : MatchState->PlayerArray)
+	{
+		AMandaMelaPlayerState* OtherState = Cast<AMandaMelaPlayerState>(State);
+		if (OtherState && OtherState != AttackerState && OtherState != TargetState && OtherState->IsParticipating())
+		{
+			if (AMandaMelaPlayerController* OtherController = Cast<AMandaMelaPlayerController>(OtherState->GetPlayerController()))
+			{
+				OtherController->ClientGameplayFeedback(TEXT("An opponent was eliminated."));
+			}
+		}
+	}
+	UpdateLivingPlayersAndCheckWinner();
+	if (MatchState->GetMatchPhase() != EMandaMelaMatchPhase::InProgress || !bTeamMode) return;
+	if (Mode == EMandaMelaMatchMode::TeamDeathmatch && MatchState->GetTeamScore(AttackerState->GetTeam()) >= TeamDeathmatchScoreLimit)
+	{
+		EndMatchForTeam(AttackerState->GetTeam());
+		return;
+	}
+	FTimerHandle RespawnTimer;
+	GetWorldTimerManager().SetTimer(RespawnTimer, FTimerDelegate::CreateWeakLambda(this,
+		[this, TargetStateWeak = TWeakObjectPtr<AMandaMelaPlayerState>(TargetState)]()
+		{
+			RespawnTeamPlayer(TargetStateWeak);
+		}), TeamRespawnDelay, false);
+}
+
+bool AMandaMelaGameMode::IsCameraPhotoAnswerCorrect(const FString& Digits, int32 CapturedNumber)
+{
+	if (CapturedNumber < 0 || CapturedNumber > 9999 || Digits.Len() != 4) return false;
+	int32 Answer = 0;
+	for (TCHAR Digit : Digits)
+	{
+		if (Digit < TEXT('0') || Digit > TEXT('9')) return false;
+		Answer = Answer * 10 + (Digit - TEXT('0'));
+	}
+	return Answer == CapturedNumber;
+}
+
+void AMandaMelaGameMode::HandleCameraPhotoCapture(AMandaMelaPlayerController* Player)
+{
+	if (!HasAuthority() || !Player) return;
+	const TWeakObjectPtr<AMandaMelaPlayerController> PlayerKey(Player);
+	int32* CameraSlot = ActiveCameraSessions.Find(PlayerKey);
+	if (!CameraSlot) return;
+
+	AMandaMelaPlayerState* PlayerState = Player->GetPlayerState<AMandaMelaPlayerState>();
+	AMandaMelaCharacter* Character = Cast<AMandaMelaCharacter>(Player->GetPawn());
+	AMandaMelaGameState* MatchState = GetGameState<AMandaMelaGameState>();
+	if (!PlayerState || !PlayerState->IsAlive() || !IsCurrentPlayer(PlayerState) || !Character
+		|| !MatchState || MatchState->GetMatchPhase() != EMandaMelaMatchPhase::InProgress
+		|| PlayerState->GetInventoryItem(*CameraSlot) != EMandaMelaItemType::Camera)
+	{
+		ActiveCameraSessions.Remove(PlayerKey);
+		Player->ClientEndCameraMode(TEXT("Camera use ended."));
+		return;
+	}
+
+	AMandaMelaCharacter* Target = FindCameraPhotoTarget(Player, ItemEffectRange);
+	AMandaMelaPlayerState* TargetState = Target ? Cast<AMandaMelaPlayerState>(Target->GetPlayerState()) : nullptr;
+	if (!Target || !TargetState)
+	{
+		Player->ClientCameraPhotoCaptureFailed(TEXT("No opponent number in frame. Move the camera and click again."));
+		return;
+	}
+
+	EMandaMelaItemType ConsumedType = EMandaMelaItemType::None;
+	if (!PlayerState->TryRemoveItem(*CameraSlot, ConsumedType) || ConsumedType != EMandaMelaItemType::Camera)
+	{
+		ActiveCameraSessions.Remove(PlayerKey);
+		Player->ClientEndCameraMode(TEXT("Camera is no longer available."));
+		return;
+	}
+	ActiveCameraSessions.Remove(PlayerKey);
+	FMandaMelaPendingCameraPhoto& Photo = PendingCameraPhotos.Add(PlayerKey);
+	Photo.Target = Target;
+	Photo.TargetState = TargetState;
+	Photo.Number = Target->GetPublicPlayerNumber();
+	Photo.TargetName = TargetState->GetPlayerName().IsEmpty() ? TEXT("Player") : TargetState->GetPlayerName();
+	Player->RefreshHeldTacticalItem(true);
+	Player->ClientStoreCameraRecord();
+	Player->ClientGameplayFeedback(TEXT("Photo captured."));
+}
+
+void AMandaMelaGameMode::HandleCameraPhotoAnswer(AMandaMelaPlayerController* Player, const FString& Digits)
+{
+	if (!HasAuthority() || !Player) return;
+	FMandaMelaPendingCameraPhoto* Photo = PendingCameraPhotos.Find(TWeakObjectPtr<AMandaMelaPlayerController>(Player));
+	if (!Photo || Photo->bCompleted) return;
+
+	AMandaMelaGameState* MatchState = GetGameState<AMandaMelaGameState>();
+	AMandaMelaPlayerState* AttackerState = Player->GetPlayerState<AMandaMelaPlayerState>();
+	AMandaMelaCharacter* TargetCharacter = Photo->Target.Get();
+	AMandaMelaPlayerState* TargetState = Photo->TargetState.Get();
+	if (!MatchState || MatchState->GetMatchPhase() != EMandaMelaMatchPhase::InProgress
+		|| !AttackerState || !AttackerState->IsAlive() || !IsCurrentPlayer(AttackerState))
+	{
+		Photo->bCompleted = true;
+		Player->ClientCameraPhotoAnswerResult(false, false, TEXT("The round or player is no longer available. Press Esc to close."));
+		return;
+	}
+	if (!TargetCharacter || !TargetState || TargetState == AttackerState || !TargetState->IsAlive()
+		|| !IsCurrentPlayer(TargetState) || TargetState->GetPawn() != TargetCharacter
+		|| TargetState->GetSecretNumber() != Photo->Number || TargetCharacter->GetPublicPlayerNumber() != Photo->Number)
+	{
+		Photo->bCompleted = true;
+		Player->ClientCameraPhotoAnswerResult(false, false, TEXT("That target is no longer available. Press Esc to close."));
+		return;
+	}
+	if (MatchState->GetMatchMode() != EMandaMelaMatchMode::Deathmatch && AttackerState->GetTeam() == TargetState->GetTeam())
+	{
+		Photo->bCompleted = true;
+		Player->ClientCameraPhotoAnswerResult(false, false, TEXT("You cannot eliminate a teammate. Press Esc to close."));
+		return;
+	}
+	if (!IsCameraPhotoAnswerCorrect(Digits, Photo->Number))
+	{
+		Player->ClientCameraPhotoAnswerResult(false, true, TEXT("Wrong number. Try again."));
+		return;
+	}
+
+	Photo->bCompleted = true;
+	const FString TargetName = Photo->TargetName;
+	EliminateTarget(AttackerState, TargetState, TargetCharacter);
+	Player->ClientCameraPhotoAnswerResult(true, false, FString::Printf(TEXT("You killed %s. Press Esc to close."), *TargetName));
+}
+
+void AMandaMelaGameMode::CancelCameraPhoto(AMandaMelaPlayerController* Player)
+{
+	if (HasAuthority() && Player)
+	{
+		ActiveCameraSessions.Remove(TWeakObjectPtr<AMandaMelaPlayerController>(Player));
+		PendingCameraPhotos.Remove(TWeakObjectPtr<AMandaMelaPlayerController>(Player));
+	}
+}
+
 bool AMandaMelaGameMode::IsCurrentPlayer(const APlayerState* PlayerState) const
 {
 	return GameState && PlayerState && GameState->PlayerArray.Contains(const_cast<APlayerState*>(PlayerState));
@@ -760,12 +943,46 @@ bool AMandaMelaGameMode::IsVisibleTarget(AController* Attacker, AMandaMelaCharac
 	{
 		return false;
 	}
+	return IsPointInCameraView(Attacker, Target->GetPublicPlayerNumberLocation(), MaxRange);
+}
+
+bool AMandaMelaGameMode::IsPointInCameraView(AController* Viewer, const FVector& Point, float MaxRange, float* OutCenterScore, float AspectRatioOverride) const
+{
+	AMandaMelaCharacter* ViewerCharacter = Viewer ? Cast<AMandaMelaCharacter>(Viewer->GetPawn()) : nullptr;
+	if (!ViewerCharacter)
+	{
+		return false;
+	}
 	FVector ViewLocation;
 	FRotator ViewRotation;
-	Attacker->GetPlayerViewPoint(ViewLocation, ViewRotation);
-	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(MandaMelaTargetVisibility), false, AttackerCharacter);
-	FHitResult Hit;
-	return GetWorld()->LineTraceSingleByChannel(Hit, ViewLocation, ViewLocation + ViewRotation.Vector() * MaxRange, ECC_Visibility, QueryParams) && Hit.GetActor() == Target;
+	Viewer->GetPlayerViewPoint(ViewLocation, ViewRotation);
+	const FVector ToPoint = Point - ViewLocation;
+	const float Distance = ToPoint.Size();
+	if (Distance <= KINDA_SMALL_NUMBER || Distance > MaxRange)
+	{
+		return false;
+	}
+
+	const FVector LocalDirection = ViewRotation.UnrotateVector(ToPoint / Distance);
+	if (LocalDirection.X <= 0.0f)
+	{
+		return false;
+	}
+	const UCameraComponent* Camera = ViewerCharacter->GetFollowCamera();
+	const float HorizontalHalfFov = FMath::DegreesToRadians(FMath::Clamp(Camera ? Camera->FieldOfView : 90.0f, 10.0f, 170.0f) * 0.5f);
+	const float AspectRatio = FMath::Max(AspectRatioOverride > 0.0f ? AspectRatioOverride : (Camera ? Camera->AspectRatio : 16.0f / 9.0f), 0.5f);
+	const float VerticalHalfFov = FMath::Atan(FMath::Tan(HorizontalHalfFov) / AspectRatio);
+	const float NormalizedX = LocalDirection.Y / (LocalDirection.X * FMath::Tan(HorizontalHalfFov));
+	const float NormalizedY = LocalDirection.Z / (LocalDirection.X * FMath::Tan(VerticalHalfFov));
+	if (FMath::Abs(NormalizedX) > 1.0f || FMath::Abs(NormalizedY) > 1.0f)
+	{
+		return false;
+	}
+	if (OutCenterScore)
+	{
+		*OutCenterScore = FMath::Square(NormalizedX) + FMath::Square(NormalizedY);
+	}
+	return true;
 }
 
 bool AMandaMelaGameMode::IsPublicNumberVisible(AController* Viewer, AMandaMelaCharacter* Target, float MaxRange) const
@@ -797,8 +1014,51 @@ bool AMandaMelaGameMode::IsPublicNumberVisible(AController* Viewer, AMandaMelaCh
 	return !bHitOccluder;
 }
 
+AMandaMelaCharacter* AMandaMelaGameMode::FindCameraPhotoTarget(AMandaMelaPlayerController* Player, float MaxRange) const
+{
+	const AMandaMelaGameState* MatchState = GetGameState<AMandaMelaGameState>();
+	const AMandaMelaPlayerState* ViewerState = Player ? Player->GetPlayerState<AMandaMelaPlayerState>() : nullptr;
+	if (!Player || !ViewerState || !MatchState)
+	{
+		return nullptr;
+	}
+
+	AMandaMelaCharacter* BestTarget = nullptr;
+	float BestCenterScore = TNumericLimits<float>::Max();
+	for (APlayerState* State : MatchState->PlayerArray)
+	{
+		AMandaMelaPlayerState* TargetState = Cast<AMandaMelaPlayerState>(State);
+		AMandaMelaCharacter* Target = TargetState ? Cast<AMandaMelaCharacter>(TargetState->GetPawn()) : nullptr;
+		if (!TargetState || TargetState == ViewerState || !TargetState->IsAlive() || !IsCurrentPlayer(TargetState) || !Target)
+		{
+			continue;
+		}
+		if (MatchState->GetMatchMode() != EMandaMelaMatchMode::Deathmatch && TargetState->GetTeam() == ViewerState->GetTeam())
+		{
+			continue;
+		}
+		const int32 Number = Target->GetPublicPlayerNumber();
+		if (Number < 0 || Number > 9999 || TargetState->GetSecretNumber() != Number
+			|| !IsPublicNumberVisible(Player, Target, MaxRange))
+		{
+			continue;
+		}
+
+		float CenterScore = 0.0f;
+		if (IsPointInCameraView(Player, Target->GetPublicPlayerNumberLocation(), MaxRange, &CenterScore, 1.0f)
+			&& CenterScore < BestCenterScore)
+		{
+			BestTarget = Target;
+			BestCenterScore = CenterScore;
+		}
+	}
+	return BestTarget;
+}
+
 void AMandaMelaGameMode::HandlePickup(AMandaMelaPlayerController* Player, AMandaMelaPickup* Pickup)
 {
+	if (Player && (PendingCameraPhotos.Contains(TWeakObjectPtr<AMandaMelaPlayerController>(Player))
+		|| ActiveCameraSessions.Contains(TWeakObjectPtr<AMandaMelaPlayerController>(Player)))) return;
 	AMandaMelaPlayerState* PlayerState = Player ? Player->GetPlayerState<AMandaMelaPlayerState>() : nullptr;
 	AMandaMelaCharacter* Character = Player ? Cast<AMandaMelaCharacter>(Player->GetPawn()) : nullptr;
 	if (!PlayerState || !PlayerState->IsAlive() || !GetGameState<AMandaMelaGameState>() || GetGameState<AMandaMelaGameState>()->GetMatchPhase() != EMandaMelaMatchPhase::InProgress)
@@ -837,6 +1097,8 @@ void AMandaMelaGameMode::HandlePickup(AMandaMelaPlayerController* Player, AManda
 
 void AMandaMelaGameMode::HandleDrop(AMandaMelaPlayerController* Player, int32 Slot)
 {
+	if (Player && (PendingCameraPhotos.Contains(TWeakObjectPtr<AMandaMelaPlayerController>(Player))
+		|| ActiveCameraSessions.Contains(TWeakObjectPtr<AMandaMelaPlayerController>(Player)))) return;
 	AMandaMelaPlayerState* PlayerState = Player ? Player->GetPlayerState<AMandaMelaPlayerState>() : nullptr;
 	AMandaMelaCharacter* Character = Player ? Cast<AMandaMelaCharacter>(Player->GetPawn()) : nullptr;
 	const AMandaMelaGameState* MatchState = GetGameState<AMandaMelaGameState>();
@@ -869,8 +1131,10 @@ void AMandaMelaGameMode::HandleDrop(AMandaMelaPlayerController* Player, int32 Sl
 	Player->ClientGameplayFeedback(TEXT("Item dropped."));
 }
 
-void AMandaMelaGameMode::HandleUseItem(AMandaMelaPlayerController* Player, int32 Slot, AMandaMelaCharacter* VisibleTarget)
+void AMandaMelaGameMode::HandleUseItem(AMandaMelaPlayerController* Player, int32 Slot, AMandaMelaCharacter*)
 {
+	if (Player && (PendingCameraPhotos.Contains(TWeakObjectPtr<AMandaMelaPlayerController>(Player))
+		|| ActiveCameraSessions.Contains(TWeakObjectPtr<AMandaMelaPlayerController>(Player)))) return;
 	AMandaMelaPlayerState* PlayerState = Player ? Player->GetPlayerState<AMandaMelaPlayerState>() : nullptr;
 	AMandaMelaCharacter* Character = Player ? Cast<AMandaMelaCharacter>(Player->GetPawn()) : nullptr;
 	AMandaMelaGameState* MatchState = GetGameState<AMandaMelaGameState>();
@@ -885,39 +1149,30 @@ void AMandaMelaGameMode::HandleUseItem(AMandaMelaPlayerController* Player, int32
 		Player->ClientGameplayFeedback(TEXT("That inventory slot is empty."));
 		return;
 	}
-	AMandaMelaPlayerState* TargetState = VisibleTarget ? Cast<AMandaMelaPlayerState>(VisibleTarget->GetPlayerState()) : nullptr;
 	if (ItemType == EMandaMelaItemType::Camera)
 	{
-		if (!VisibleTarget || !TargetState)
+		ActiveCameraSessions.Add(TWeakObjectPtr<AMandaMelaPlayerController>(Player), Slot);
+		Character->MulticastPlayCameraUseAnimation();
+		const float CameraAnimationDuration = Character->GetCameraUseAnimationDuration();
+		if (CameraAnimationDuration > 0.0f)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("HandleUseItem(Camera): missing target or target playerstate (Player=%s)"), *GetNameSafe(Player));
-			Player->ClientGameplayFeedback(TEXT("Aim at a visible opponent to record their number."));
-			return;
+			const TWeakObjectPtr<AMandaMelaPlayerController> WeakPlayer = Player;
+			FTimerHandle CameraItemRefreshTimer;
+			GetWorldTimerManager().SetTimer(CameraItemRefreshTimer, FTimerDelegate::CreateWeakLambda(this, [WeakPlayer]()
+			{
+				if (AMandaMelaPlayerController* ActivePlayer = WeakPlayer.Get())
+				{
+					ActivePlayer->RefreshHeldTacticalItem(false);
+				}
+			}), CameraAnimationDuration, false);
 		}
-		if (!TargetState->IsAlive())
+		else
 		{
-			UE_LOG(LogTemp, Warning, TEXT("HandleUseItem(Camera): target not alive (Target=%s, Player=%s)"), *GetNameSafe(VisibleTarget), *GetNameSafe(Player));
-			Player->ClientGameplayFeedback(TEXT("Aim at a visible opponent to record their number."));
-			return;
+			Player->RefreshHeldTacticalItem(false);
 		}
-		if (!IsCurrentPlayer(TargetState))
-		{
-			UE_LOG(LogTemp, Warning, TEXT("HandleUseItem(Camera): target not a current player (Target=%s, Player=%s)"), *GetNameSafe(VisibleTarget), *GetNameSafe(Player));
-			Player->ClientGameplayFeedback(TEXT("Aim at a visible opponent to record their number."));
-			return;
-		}
-		if (!IsVisibleTarget(Player, VisibleTarget, ItemEffectRange))
-		{
-			UE_LOG(LogTemp, Warning, TEXT("HandleUseItem(Camera): IsVisibleTarget failed (Target=%s, Player=%s)"), *GetNameSafe(VisibleTarget), *GetNameSafe(Player));
-			Player->ClientGameplayFeedback(TEXT("Aim at a visible opponent to record their number."));
-			return;
-		}
-		if (!IsPublicNumberVisible(Player, VisibleTarget, ItemEffectRange))
-		{
-			UE_LOG(LogTemp, Warning, TEXT("HandleUseItem(Camera): IsPublicNumberVisible failed (Target=%s, Player=%s)"), *GetNameSafe(VisibleTarget), *GetNameSafe(Player));
-			Player->ClientGameplayFeedback(TEXT("Aim at a visible opponent to record their number."));
-			return;
-		}
+		Player->ClientEnterCameraMode();
+		Player->ClientGameplayFeedback(TEXT("Camera ready. Left click to take a photo."));
+		return;
 	}
 	if (ItemType == EMandaMelaItemType::SmokeBomb && !SmokeParticleEffect)
 	{
@@ -950,10 +1205,6 @@ void AMandaMelaGameMode::HandleUseItem(AMandaMelaPlayerController* Player, int32
 	case EMandaMelaItemType::Binoculars:
 		Player->ClientUseBinoculars(4.0f);
 		Player->ClientGameplayFeedback(TEXT("Binoculars used."));
-		break;
-	case EMandaMelaItemType::Camera:
-		Player->ClientStoreCameraRecord(VisibleTarget->GetPublicPlayerNumber());
-		Player->ClientGameplayFeedback(TEXT("Number recorded."));
 		break;
 	case EMandaMelaItemType::Flashbang:
 		{
@@ -1370,6 +1621,7 @@ void AMandaMelaGameMode::StartLootSpawning()
 		It->Destroy();
 	}
 
+	bSpawnCameraNext = true;
 	const int32 MaxItems = FMath::Max(1, MaxWorldLootCount);
 	for (int32 Index = 0; Index < FMath::Min(InitialLootCount, MaxItems); ++Index)
 	{
@@ -1418,9 +1670,17 @@ void AMandaMelaGameMode::SpawnRandomLoot()
 	if (AMandaMelaPickup* Pickup = GetWorld()->SpawnActor<AMandaMelaPickup>(AMandaMelaPickup::StaticClass(),
 		SpawnLocation, FRotator::ZeroRotator, SpawnParameters))
 	{
-		const int32 FirstItem = static_cast<int32>(EMandaMelaItemType::Binoculars);
-		const int32 LastItem = static_cast<int32>(EMandaMelaItemType::SoundDecoy);
-		Pickup->SetItemType(static_cast<EMandaMelaItemType>(FMath::RandRange(FirstItem, LastItem)));
+		if (bSpawnCameraNext)
+		{
+			Pickup->SetItemType(EMandaMelaItemType::Camera);
+			bSpawnCameraNext = false;
+		}
+		else
+		{
+			const int32 FirstItem = static_cast<int32>(EMandaMelaItemType::Binoculars);
+			const int32 LastItem = static_cast<int32>(EMandaMelaItemType::SoundDecoy);
+			Pickup->SetItemType(static_cast<EMandaMelaItemType>(FMath::RandRange(FirstItem, LastItem)));
+		}
 	}
 }
 

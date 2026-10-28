@@ -42,6 +42,9 @@ private:
 	TObjectPtr<UStaticMeshComponent> Mesh;
 
 	UPROPERTY(VisibleAnywhere)
+	TObjectPtr<UStaticMeshComponent> CameraMesh;
+
+	UPROPERTY(VisibleAnywhere)
 	TObjectPtr<USkeletalMeshComponent> TacticMesh;
 
 	UPROPERTY(VisibleAnywhere)
@@ -49,6 +52,9 @@ private:
 
 	UPROPERTY(EditDefaultsOnly, Category="Pickup|Models")
 	TObjectPtr<USkeletalMesh> BinocularsModel;
+
+	UPROPERTY(EditDefaultsOnly, Category="Pickup|Models")
+	TObjectPtr<UStaticMesh> CameraModel;
 
 	UPROPERTY(EditDefaultsOnly, Category="Pickup|Models")
 	TObjectPtr<USkeletalMesh> FlashbangModel;

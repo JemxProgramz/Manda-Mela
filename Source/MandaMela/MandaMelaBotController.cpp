@@ -4,7 +4,18 @@
 #include "MandaMelaCharacter.h"
 #include "MandaMelaGameMode.h"
 #include "MandaMelaMatchState.h"
+#include "GameFramework/PawnMovementComponent.h"
 #include "GameFramework/Pawn.h"
+#include "HAL/IConsoleManager.h"
+
+namespace
+{
+	TAutoConsoleVariable<int32> CVarMandaMelaBotsPaused(
+		TEXT("MandaMela.BotsPaused"),
+		0,
+		TEXT("Pause all offline bot movement. Set to 0 to resume."),
+		ECVF_Cheat);
+}
 
 AMandaMelaBotController::AMandaMelaBotController()
 {
@@ -41,6 +52,15 @@ void AMandaMelaBotController::Tick(float DeltaSeconds)
 
 	if (APawn* BotPawn = GetPawn())
 	{
+		if (CVarMandaMelaBotsPaused.GetValueOnGameThread() != 0)
+		{
+			if (UPawnMovementComponent* Movement = BotPawn->GetMovementComponent())
+			{
+				Movement->StopMovementImmediately();
+			}
+			return;
+		}
+
 		if (MatchState->GetMatchMode() == EMandaMelaMatchMode::TeamDeathmatch && OwnState->GetTeam() != EMandaMelaTeam::None)
 		{
 			AMandaMelaGameMode* GameMode = GetWorld()->GetAuthGameMode<AMandaMelaGameMode>();

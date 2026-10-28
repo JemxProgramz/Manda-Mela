@@ -15,6 +15,7 @@ bool FMandaMelaPickupTacticalModelsTest::RunTest(const FString& Parameters)
 	const UClass* PickupClass = AMandaMelaPickup::StaticClass();
 	const TPair<const TCHAR*, const TCHAR*> Models[] =
 	{
+		{ TEXT("CameraModel"), TEXT("/Game/Tactics/camera/Camera_GameReady/Camera_GameReady") },
 		{ TEXT("BinocularsModel"), TEXT("/Game/Tactics/binocular1.binocular1") },
 		{ TEXT("FlashbangModel"), TEXT("/Game/Tactics/flashbang.flashbang") },
 		{ TEXT("SmokeBombModel"), TEXT("/Game/Tactics/smoke.smoke") }

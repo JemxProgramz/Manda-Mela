@@ -8,7 +8,10 @@
 #include "MandaMelaGameplayWidget.generated.h"
 
 class UBorder;
+class UBackgroundBlur;
+class UCanvasPanel;
 class UImage;
+class USizeBox;
 class UTextBlock;
 class UTexture2D;
 class UTextureRenderTarget2D;
@@ -30,8 +33,11 @@ public:
 	void SetSpectatorInfo(bool bVisible, const FText& TargetName, int32 CurrentTarget, int32 TargetCount);
 	void SetSpectatorDeathMessage(const FText& Message);
 	void SetDeathNotice(bool bVisible, const FText& Message = FText::GetEmpty());
-	void SetCameraPhoto(UTextureRenderTarget2D* Photo, const FText& TargetNumber);
-	void ShowCameraPhotoCard(UTextureRenderTarget2D* Photo, const FText& TargetNumber, float DisplayDuration = 5.0f);
+	void ShowCameraPhotoCard(UTextureRenderTarget2D* Photo, const FText& Status);
+	void SetCameraPhotoStatus(const FText& Status);
+	void SetCameraModeVisible(bool bVisible);
+	void SetCameraModeStatus(const FText& Status);
+	void SetKeyHint(const FText& Hint);
 	void HideCameraPhotoCard();
 	void StartFlashEffect(float Intensity, const FLinearColor& WarmTint);
 	void UpdateFlashEffect(float Intensity);
@@ -106,9 +112,21 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UBorder> CameraPhotoPanel;
 	UPROPERTY(Transient)
+	TObjectPtr<USizeBox> CameraPhotoFrame;
+	UPROPERTY(Transient)
 	TObjectPtr<UImage> CameraPhotoImageWidget;
 	UPROPERTY(Transient)
-	TObjectPtr<UTextBlock> CameraPhotoNumberText;
+	TObjectPtr<UTextBlock> CameraPhotoStatusText;
+	UPROPERTY(Transient)
+	TObjectPtr<UBorder> CameraPhotoBackdrop;
+	UPROPERTY(Transient)
+	TObjectPtr<UBackgroundBlur> CameraPhotoBlur;
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UTextBlock>> CameraPhotoDigitTexts;
+	UPROPERTY(Transient)
+	TObjectPtr<UCanvasPanel> CameraModePanel;
+	UPROPERTY(Transient)
+	TObjectPtr<UTextBlock> CameraModeStatusText;
 	UPROPERTY(Transient)
 	TObjectPtr<UBorder> KeyHintPanel;
 	UPROPERTY(Transient)
